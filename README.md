@@ -47,8 +47,8 @@
   - Windows: 从 [ffmpeg.org](https://ffmpeg.org) 下载
 
 - **LLM API Key**（选择其一）
-  - **Qwen API Key** - 从[阿里云](https://dashscope.aliyun.com/)获取密钥
-  - **OpenRouter API Key** - 从[OpenRouter](https://openrouter.ai/)获取密钥
+  - **Qwen API Key** - 从[阿里云](https://dashscope.aliyun.com/)获取密钥（默认使用 qwen3.5-flash 模型）
+  - **OpenRouter API Key** - 从[OpenRouter](https://openrouter.ai/)获取密钥（默认使用 openrouter/free 模型）
 
 - **Firefox 浏览器** (可选) - 使用浏览器 Cookie 让Bilibili 视频下载更稳定
 

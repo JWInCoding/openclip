@@ -47,8 +47,8 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
   - Windows: Download from [ffmpeg.org](https://ffmpeg.org)
 
 - **LLM API Key** (choose one)
-  - **Qwen API Key** - Get your key from [Alibaba Cloud](https://dashscope.aliyun.com/)
-  - **OpenRouter API Key** - Get your key from [OpenRouter](https://openrouter.ai/)
+  - **Qwen API Key** - Get your key from [Alibaba Cloud](https://dashscope.aliyun.com/) (uses qwen3.5-flash model by default)
+  - **OpenRouter API Key** - Get your key from [OpenRouter](https://openrouter.ai/) (uses openrouter/free model by default)
 
 - **Firefox Browser** (optional) - For more stable Bilibili video downloads
 
