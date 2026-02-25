@@ -22,6 +22,9 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 
 ## 📢 News
 
+- **2025-02-26**: 
+  - Switched default Qwen model from legacy qwen-turbo to qwen3.5-flash
+  - Improved AI prompts to reduce timestamp hallucination and enhance title quality
 - **2025-02-16**: Added clip preview and selection — preview all generated clips before title/cover generation, deselect unwanted clips, and only process the ones you keep.
 
 ## ✨ Features

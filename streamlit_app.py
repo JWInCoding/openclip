@@ -16,7 +16,7 @@ from typing import Optional, Dict, Any
 
 # Import the video orchestrator
 from video_orchestrator import VideoOrchestrator
-from core.config import API_KEY_ENV_VARS, DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS
+from core.config import API_KEY_ENV_VARS, DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, LLM_CONFIG
 
 # Set page config
 st.set_page_config(
@@ -535,6 +535,12 @@ with st.sidebar:
         key=f"llm_provider_{st.session_state.reset_counter}"
     )
     data['llm_provider'] = llm_provider
+    
+    # Show model info based on provider
+    if llm_provider == "qwen":
+        st.caption(f"ℹ️ Using model: {LLM_CONFIG['qwen']['default_model']}")
+    elif llm_provider == "openrouter":
+        st.caption(f"ℹ️ Using model: {LLM_CONFIG['openrouter']['default_model']}")
     
     # API key input (optional, since it can be set via environment variable)
     api_key_env_var = API_KEY_ENV_VARS.get(llm_provider, "QWEN_API_KEY")
