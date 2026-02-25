@@ -10,6 +10,13 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 
 > 💡 **How is it different from AutoClip?** See the [comparison section](#-comparison-with-autoclip) to learn about OpenClip's lightweight design philosophy.
 
+## 📢 News
+
+- **2025-02-26**: 
+  - Switched default Qwen model from legacy qwen-turbo to qwen3.5-flash
+  - Improved AI prompts to reduce timestamp hallucination and enhance title quality
+- **2025-02-16**: Added clip preview and selection — preview all generated clips before title/cover generation, deselect unwanted clips, and only process the ones you keep.
+
 ## 🎬 Demos
 
 ### Web UI Demo
@@ -19,13 +26,6 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 ### Agent Skills Demo
 
 <video src="https://github.com/user-attachments/assets/212855d0-336c-4708-8c43-c57f3e5eecd1" controls width="600" height="450"></video>
-
-## 📢 News
-
-- **2025-02-26**: 
-  - Switched default Qwen model from legacy qwen-turbo to qwen3.5-flash
-  - Improved AI prompts to reduce timestamp hallucination and enhance title quality
-- **2025-02-16**: Added clip preview and selection — preview all generated clips before title/cover generation, deselect unwanted clips, and only process the ones you keep.
 
 ## ✨ Features
 - **Flexible Input**: Bilibili/YouTube URLs or local video files

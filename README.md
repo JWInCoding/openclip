@@ -10,6 +10,13 @@
 
 > 💡 **与 AutoClip 的区别？** 查看[对比说明](#-与-autoclip-的对比)了解 OpenClip 的轻量级设计理念。
 
+## 📢 最新动态
+
+- **2025-02-26**: 
+  - 默认 Qwen 模型从旧版 qwen-turbo 切换至 qwen3.5-flash
+  - 优化 AI 提示词，减少时间戳幻觉，提升标题质量
+- **2025-02-16**: 新增剪辑预览与筛选功能 — 在生成标题和封面之前，可以先预览所有剪辑片段，取消不需要的片段后再继续处理。
+
 ## 🎬 演示
 
 ### 网页页面
@@ -19,13 +26,6 @@
 ### Agent Skills
 
 <video src="https://github.com/user-attachments/assets/1ddf8318-f6ad-418c-9c4c-bbac0dedc668" controls width="600" height="450"></video>
-
-## 📢 最新动态
-
-- **2025-02-26**: 
-  - 默认 Qwen 模型从旧版 qwen-turbo 切换至 qwen3.5-flash
-  - 优化 AI 提示词，减少时间戳幻觉，提升标题质量
-- **2025-02-16**: 新增剪辑预览与筛选功能 — 在生成标题和封面之前，可以先预览所有剪辑片段，取消不需要的片段后再继续处理。
 
 ## ✨ 特性
 - **灵活输入**：支持 Bilibili、YouTube URL 或本地视频文件
