@@ -64,7 +64,9 @@ class VideoOrchestrator:
                 max_clips: int = MAX_CLIPS,
                 cover_text_location: str = "center",
                 cover_fill_color: str = "yellow",
-                cover_outline_color: str = "black"):
+                cover_outline_color: str = "black",
+                enable_diarization: bool = False,
+                speaker_references_dir: Optional[str] = None):
         """
         Initialize the video orchestrator
 
@@ -110,7 +112,11 @@ class VideoOrchestrator:
             browser=browser
         )
         self.video_splitter = VideoSplitter(max_duration_minutes, self.output_dir)
-        self.transcript_processor = TranscriptProcessor(whisper_model)
+        self.transcript_processor = TranscriptProcessor(
+            whisper_model,
+            enable_diarization=enable_diarization,
+            speaker_references_dir=speaker_references_dir,
+        )
         self.download_processor = DownloadProcessor(self.downloader)
         
         # Initialize engaging moments analyzer only if not skipping and API key is available
@@ -173,7 +179,6 @@ class VideoOrchestrator:
         
         logger.info(f"🎬 Video Orchestrator initialized")
         logger.info(f"📁 Output directory: {self.output_dir}")
-        logger.info(f"⏱️  Max duration: {max_duration_minutes} minutes")
         logger.info(f"🤖 Whisper model: {whisper_model}")
     
     async def process_video(self,
@@ -950,6 +955,10 @@ Note: Set QWEN_API_KEY or OPENROUTER_API_KEY environment variable based on your 
                        help='Enable verbose logging')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug mode to export full prompts sent to LLM')
+    parser.add_argument('--speaker-references', metavar='DIR',
+                       help='Directory of reference audio clips for speaker name mapping '
+                            '(e.g. references/Host.wav). Filename stem becomes the speaker name. '
+                            'Enables diarization. Requires: uv sync --extra speakers, HUGGINGFACE_TOKEN.')
     args = parser.parse_args()
 
     if args.verbose:
@@ -985,7 +994,9 @@ Note: Set QWEN_API_KEY or OPENROUTER_API_KEY environment variable based on your 
         max_clips=args.max_clips,
         cover_text_location=args.cover_text_location,
         cover_fill_color=parse_rgb_color(args.cover_fill_color),
-        cover_outline_color=parse_rgb_color(args.cover_outline_color)
+        cover_outline_color=parse_rgb_color(args.cover_outline_color),
+        enable_diarization=args.speaker_references is not None,
+        speaker_references_dir=args.speaker_references,
     )
     
     def progress_callback(status: str, progress: float):

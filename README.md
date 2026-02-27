@@ -12,7 +12,8 @@
 
 ## 📢 最新动态
 
-- **2025-02-26**: 
+- **2026-02-27**: 新增说话人识别功能（预览版）— 使用 `--speaker-references` 为访谈/座谈/播客视频自动标注说话人姓名
+- **2025-02-26**:
   - 默认 Qwen 模型从旧版 qwen-turbo 切换至 qwen3.5-flash
   - 优化 AI 提示词，减少时间戳幻觉，提升标题质量
 - **2025-02-16**: 新增剪辑预览与筛选功能 — 在生成标题和封面之前，可以先预览所有剪辑片段，取消不需要的片段后再继续处理。
@@ -30,6 +31,7 @@
 ## ✨ 特性
 - **灵活输入**：支持 Bilibili、YouTube URL 或本地视频文件
 - **智能转录**：优先使用平台字幕，回退到 Whisper
+- **说话人识别**（预览版）：自动识别谁在说话，将真实姓名标注到字幕中，适合访谈、座谈、辩论和播客
 - **AI 分析**：基于内容、互动和娱乐价值识别精彩时刻
 - **剪辑生成**：提取最精彩时刻为独立视频剪辑，自动生成字幕文件、标题和封面图片
 - **背景上下文**：可选的添加背景信息（如主播姓名等）以获得更好的分析
@@ -51,6 +53,7 @@
   - **OpenRouter API Key** - 从[OpenRouter](https://openrouter.ai/)获取密钥（默认使用 openrouter/free 模型）
 
 - **Firefox 浏览器** (可选) - 使用浏览器 Cookie 让Bilibili 视频下载更稳定
+- **HuggingFace Token** (可选，用于说话人识别) - 从 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 获取，并接受 [pyannote 模型协议](https://huggingface.co/pyannote/speaker-diarization-community-1)
 
 ### 由 uv 自动管理
 
@@ -60,6 +63,10 @@
 - **yt-dlp** - 用于从 Bilibili、YouTube 等平台下载视频
 - **Whisper** - 用于语音转文字
 - 其他 Python 依赖（moviepy、streamlit 等）
+
+运行 `uv sync --extra speakers` 时额外安装（说话人识别功能）：
+- **WhisperX** - 更快的转录引擎，支持说话人分离
+- **pyannote.audio** - 说话人分离模型
 
 ## 🚀 快速开始
 
@@ -87,6 +94,39 @@ export OPENROUTER_API_KEY=your_api_key_here
 ```
 
 ### 3. 运行流水线
+
+### 4. 说话人识别（可选，预览版）
+
+> ⚠️ **预览功能**：说话人识别功能目前处于预览阶段，后续版本中行为或接口可能有所调整。
+
+适用于访谈、座谈、辩论、播客等多人对话视频。启用后，字幕中每句话前会标注说话人姓名，例如 `[Host] 欢迎来到今天的节目`。
+
+**步骤一：安装额外依赖**
+```bash
+uv sync --extra speakers
+```
+
+**步骤二：设置 HuggingFace Token**
+```bash
+export HUGGINGFACE_TOKEN=hf_your_token_here
+```
+并在 HuggingFace 上接受 [pyannote 模型协议](https://huggingface.co/pyannote/speaker-diarization-community-1)。
+
+**步骤三：提取参考音频**
+
+从视频中截取每位说话人的参考片段（10–30 秒，单人清晰语音）：
+```bash
+uv run python tools/extract_reference.py VIDEO 起始时间 结束时间 "references/姓名.wav"
+
+# 示例
+uv run python tools/extract_reference.py interview.mp4 00:01:23 00:01:50 "references/Host.wav"
+uv run python tools/extract_reference.py interview.mp4 00:03:10 00:03:40 "references/Guest.wav"
+```
+
+**步骤四：运行**
+```bash
+uv run python video_orchestrator.py --speaker-references references/ "VIDEO_URL_OR_PATH"
+```
 
 #### 选项 A：使用 Streamlit 网页界面
 
@@ -151,6 +191,7 @@ uv run python video_orchestrator.py "/path/to/video.mp4"
 | `--cover-text-location` | 封面文字位置（`top`/`upper_middle`/`bottom`/`center`） | `center` |
 | `--cover-fill-color` | 封面文字填充颜色（`yellow`/`red`/`white`/`cyan`/`green`/`orange`/`pink`/`purple`/`gold`/`silver`） | `yellow` |
 | `--cover-outline-color` | 封面文字描边颜色（`yellow`/`red`/`white`/`cyan`/`green`/`orange`/`pink`/`purple`/`gold`/`silver`/`black`） | `black` |
+| `--speaker-references` | 参考音频目录，用于说话人姓名映射（预览版）。文件名即说话人姓名（如 `references/Host.wav`）。需要 `uv sync --extra speakers` 和 `HUGGINGFACE_TOKEN` | 无 |
 | `--skip-transcript` | 跳过转录生成（使用已有转录文件） | 关 |
 | `--skip-download` | 跳过下载，使用已下载的视频 | 关 |
 | `--skip-analysis` | 跳过分析，使用已有分析结果 | 关 |
@@ -192,6 +233,13 @@ uv run python video_orchestrator.py \
 **仅分析，不生成剪辑：**
 ```bash
 uv run python video_orchestrator.py --skip-clips --no-titles "VIDEO_URL"
+```
+
+**说话人识别（预览版）：**
+```bash
+uv run python video_orchestrator.py \
+  --speaker-references references/ \
+  "interview.mp4"
 ```
 
 **跳过下载，重新处理已有视频：**
@@ -291,6 +339,14 @@ AI 分析（每个片段）
 
 ### 内存问题
 **原因**：视频过长。尝试 `--max-duration 10` 缩短分割时长，或 `--skip-titles` 分阶段处理。
+
+### 说话人识别不工作
+
+**未找到 WhisperX**：运行 `uv sync --extra speakers` 安装额外依赖。
+
+**HuggingFace Token 错误**：检查 `echo $HUGGINGFACE_TOKEN` 是否已设置，并确认已在 HuggingFace 上接受 [pyannote 模型协议](https://huggingface.co/pyannote/speaker-diarization-community-1)。
+
+**说话人未被识别（显示 SPEAKER_XX 而非姓名）**：参考音频相似度低于阈值（默认 0.7）。尝试使用更长、更清晰的参考片段（推荐 10–30 秒），确保片段中只有一位说话人。
 
 ### 中文文本不显示
 **原因**：缺少中文字体。macOS 自动检测（STHeiti、PingFang），Windows 需安装宋体或微软雅黑，Linux 安装 `fonts-wqy-zenhei`。

@@ -12,7 +12,8 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 
 ## 📢 News
 
-- **2025-02-26**: 
+- **2026-02-27**: Added speaker identification (Preview) — use `--speaker-references` to automatically label speakers by name in transcripts for interviews, panels, and podcasts
+- **2025-02-26**:
   - Switched default Qwen model from legacy qwen-turbo to qwen3.5-flash
   - Improved AI prompts to reduce timestamp hallucination and enhance title quality
 - **2025-02-16**: Added clip preview and selection — preview all generated clips before title/cover generation, deselect unwanted clips, and only process the ones you keep.
@@ -30,6 +31,7 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 ## ✨ Features
 - **Flexible Input**: Bilibili/YouTube URLs or local video files
 - **Smart Transcription**: Uses platform subtitles when available, falls back to Whisper
+- **Speaker Identification** (Preview): automatically identifies who is speaking and labels transcripts with real names — great for interviews, panels, debates, and podcasts
 - **AI Analysis**: Identifies engaging moments based on content, interaction, and entertainment value
 - **Clip Generation**: Extracts the most engaging moments as standalone video clips, automatically generating subtitle files, titles, and cover images
 - **Background Context**: Optionally add background information (e.g., streamer names) for better analysis
@@ -51,6 +53,7 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
   - **OpenRouter API Key** - Get your key from [OpenRouter](https://openrouter.ai/) (uses openrouter/free model by default)
 
 - **Firefox Browser** (optional) - For more stable Bilibili video downloads
+- **HuggingFace Token** (optional, for speaker identification) - Get from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and accept the [pyannote model agreement](https://huggingface.co/pyannote/speaker-diarization-community-1)
 
 ### Managed by uv
 
@@ -60,6 +63,10 @@ The following are installed automatically when you run `uv sync`:
 - **yt-dlp** - For downloading videos from Bilibili, YouTube, etc.
 - **Whisper** - For speech-to-text transcription
 - Other Python dependencies (moviepy, streamlit, etc.)
+
+Run `uv sync --extra speakers` to additionally install (for speaker identification):
+- **WhisperX** - Faster transcription engine with speaker diarization support
+- **pyannote.audio** - Speaker diarization model
 
 ## 🚀 Quick Start
 
@@ -87,6 +94,39 @@ export OPENROUTER_API_KEY=your_api_key_here
 ```
 
 ### 3. Run the Pipeline
+
+### 4. Speaker Identification (Optional, Preview)
+
+> ⚠️ **Preview feature**: Speaker identification is in preview. Behavior and interface may change in future releases.
+
+For interviews, panels, debates, podcasts, and any multi-speaker video. When enabled, each line in the transcript is prefixed with the speaker's name, e.g. `[Host] Welcome to today's show`.
+
+**Step 1: Install extra dependencies**
+```bash
+uv sync --extra speakers
+```
+
+**Step 2: Set your HuggingFace Token**
+```bash
+export HUGGINGFACE_TOKEN=hf_your_token_here
+```
+And accept the [pyannote model agreement](https://huggingface.co/pyannote/speaker-diarization-community-1) on HuggingFace.
+
+**Step 3: Extract reference audio**
+
+Cut a short clip of each speaker from your video (10–30 seconds, single speaker, clean audio):
+```bash
+uv run python tools/extract_reference.py VIDEO START END "references/Name.wav"
+
+# Examples
+uv run python tools/extract_reference.py interview.mp4 00:01:23 00:01:50 "references/Host.wav"
+uv run python tools/extract_reference.py interview.mp4 00:03:10 00:03:40 "references/Guest.wav"
+```
+
+**Step 4: Run**
+```bash
+uv run python video_orchestrator.py --speaker-references references/ "VIDEO_URL_OR_PATH"
+```
 
 #### Option A: Using Streamlit Web Interface
 
@@ -151,6 +191,7 @@ uv run python video_orchestrator.py "/path/to/video.mp4"
 | `--cover-text-location` | Cover text position (`top`/`upper_middle`/`bottom`/`center`) | `center` |
 | `--cover-fill-color` | Cover text fill color (`yellow`/`red`/`white`/`cyan`/`green`/`orange`/`pink`/`purple`/`gold`/`silver`) | `yellow` |
 | `--cover-outline-color` | Cover text outline color (`yellow`/`red`/`white`/`cyan`/`green`/`orange`/`pink`/`purple`/`gold`/`silver`/`black`) | `black` |
+| `--speaker-references` | Directory of reference audio clips for speaker name mapping (Preview). Filename stem becomes the speaker name (e.g. `references/Host.wav`). Requires `uv sync --extra speakers` and `HUGGINGFACE_TOKEN` | None |
 | `--skip-transcript` | Skip transcript generation (use existing transcript files) | Off |
 | `--skip-download` | Skip download, use existing video | Off |
 | `--skip-analysis` | Skip analysis, use existing results | Off |
@@ -192,6 +233,13 @@ uv run python video_orchestrator.py \
 **Analysis only, no clip generation:**
 ```bash
 uv run python video_orchestrator.py --skip-clips --skip-titles "VIDEO_URL"
+```
+
+**Speaker identification (Preview):**
+```bash
+uv run python video_orchestrator.py \
+  --speaker-references references/ \
+  "interview.mp4"
 ```
 
 **Skip download, reprocess existing video:**
@@ -291,6 +339,14 @@ Output Ready!
 
 ### Memory issues
 **Cause**: Very long video. Try `--max-duration 10` for shorter splits, or `--skip-titles` to process in stages.
+
+### Speaker identification not working
+
+**WhisperX not found**: Run `uv sync --extra speakers` to install the extra dependencies.
+
+**HuggingFace Token error**: Check `echo $HUGGINGFACE_TOKEN` is set, and confirm you have accepted the [pyannote model agreement](https://huggingface.co/pyannote/speaker-diarization-community-1) on HuggingFace.
+
+**Speakers not matched (showing SPEAKER_XX instead of names)**: The reference audio similarity is below the threshold (default 0.7). Try a longer, cleaner reference clip (10–30 seconds recommended) with only one speaker throughout.
 
 ### Chinese text not displaying
 **Cause**: Missing Chinese fonts. macOS auto-detects (STHeiti, PingFang), Windows needs SimSun or Microsoft YaHei, Linux needs `fonts-wqy-zenhei`.

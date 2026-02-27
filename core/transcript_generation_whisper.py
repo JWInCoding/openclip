@@ -15,6 +15,11 @@ from core.config import WHISPER_MODEL
 
 logger = logging.getLogger(__name__)
 
+try:
+    from core.transcript_generation_whisperx import TranscriptProcessorWhisperX, WHISPERX_AVAILABLE
+except ImportError:
+    WHISPERX_AVAILABLE = False
+
 def run_whisper_cli(file_path, model_name=WHISPER_MODEL, language=None, output_format="srt", output_dir=None):
     """
     Transcribe audio/video file using OpenAI Whisper CLI
@@ -150,30 +155,60 @@ def simple_transcribe(audio_file, model="base"):
 
 class TranscriptProcessor:
     """Handles all transcript-related operations"""
-    
-    def __init__(self, whisper_model: str = WHISPER_MODEL):
+
+    def __init__(
+        self,
+        whisper_model: str = WHISPER_MODEL,
+        language: Optional[str] = None,
+        enable_diarization: bool = False,
+        speaker_references_dir: Optional[str] = None,
+    ):
         self.whisper_model = whisper_model
-    
-    async def process_transcripts(self, 
+        self.language = language  # None = auto-detect
+        self.enable_diarization = enable_diarization
+        # WhisperX is required for diarization; enable it automatically when requested.
+        self.use_whisperx = enable_diarization and WHISPERX_AVAILABLE
+
+        if enable_diarization and not WHISPERX_AVAILABLE:
+            logger.warning("⚠️  Speaker diarization requested but WhisperX is not installed. Falling back to openai-whisper (no speaker labels). Run: uv sync --extra speakers")
+
+        self.whisperx_processor = None
+        if self.use_whisperx:
+            self.whisperx_processor = TranscriptProcessorWhisperX(
+                whisper_model,
+                enable_diarization=enable_diarization,
+                speaker_references_dir=speaker_references_dir,
+            )
+
+    async def process_transcripts(self,
                                 subtitle_path: str,
                                 video_files: List[str] or str,
                                 force_whisper: bool,
                                 progress_callback: Optional[Callable[[str, float], None]]) -> Dict[str, Any]:
-        """Process transcripts - either use existing subtitles or generate with whisper"""
-        
-        # Determine transcript source
-        use_whisper = force_whisper or not subtitle_path or not os.path.exists(subtitle_path)
-        
-        if use_whisper:
-            logger.info("🤖 Using Whisper for transcript generation")
-            return await self._generate_whisper_transcripts(video_files, progress_callback)
+        """Process transcripts - either use existing subtitles or generate with whisper/whisperx"""
+
+        has_existing = subtitle_path and os.path.exists(subtitle_path)
+
+        if force_whisper or not has_existing:
+            # Scenario 1: Generate new transcript
+            if self.whisperx_processor:
+                logger.info("⚡ Using WhisperX for transcript generation")
+                return await self._generate_whisperx_transcripts(video_files, progress_callback)
+            else:
+                logger.info("🤖 Using Whisper for transcript generation")
+                return await self._generate_whisper_transcripts(video_files, progress_callback)
         else:
-            logger.info("📥 Using existing subtitles")
-            return {
-                'source': 'bilibili' if 'bilibili' in subtitle_path else 'existing',
-                'transcript_path': subtitle_path if isinstance(video_files, str) else '',
-                'transcript_parts': [] if isinstance(video_files, str) else self._get_existing_transcript_parts(video_files)
-            }
+            # Scenario 2: Use existing transcript
+            if self.whisperx_processor and self.enable_diarization:
+                logger.info("⚡ Using WhisperX diarization on existing transcript")
+                return await self._add_speakers_to_existing(video_files, progress_callback)
+            else:
+                logger.info("📥 Using existing subtitles")
+                return {
+                    'source': 'bilibili' if 'bilibili' in subtitle_path else 'existing',
+                    'transcript_path': subtitle_path if isinstance(video_files, str) else '',
+                    'transcript_parts': [] if isinstance(video_files, str) else self._get_existing_transcript_parts(video_files)
+                }
     
     async def _generate_whisper_transcripts(self, 
                                           video_files: List[str] or str,
@@ -200,7 +235,7 @@ class TranscriptProcessor:
             success = run_whisper_cli(
                 str(video_path),
                 model_name=self.whisper_model,
-                language="zh",  # Assuming Chinese content
+                language=self.language,
                 output_format="srt",
                 output_dir=str(video_dir)
             )
@@ -221,6 +256,70 @@ class TranscriptProcessor:
             'transcript_parts': transcript_parts
         }
     
+    async def _generate_whisperx_transcripts(self,
+                                             video_files: List[str] or str,
+                                             progress_callback: Optional[Callable[[str, float], None]]) -> Dict[str, Any]:
+        """Generate transcripts using WhisperX (Scenario 1)."""
+        if isinstance(video_files, str):
+            video_files = [video_files]
+
+        transcript_parts = []
+        total_files = len(video_files)
+
+        for i, video_file in enumerate(video_files):
+            if progress_callback:
+                base_progress = 35 + (i / total_files) * 13
+                progress_callback(f"Transcribing {i+1}/{total_files} with WhisperX...", base_progress)
+
+            logger.info(f"⚡ WhisperX transcribing: {Path(video_file).name}")
+            srt_path = await self.whisperx_processor.transcribe_with_whisperx(video_file, progress_callback)
+
+            if srt_path and Path(srt_path).exists():
+                transcript_parts.append(srt_path)
+                logger.info(f"✅ Generated: {Path(srt_path).name}")
+            else:
+                logger.error(f"❌ WhisperX failed for {Path(video_file).name}")
+
+        return {
+            'source': 'whisperx',
+            'transcript_path': transcript_parts[0] if len(transcript_parts) == 1 else '',
+            'transcript_parts': transcript_parts,
+        }
+
+    async def _add_speakers_to_existing(self,
+                                        video_files: List[str] or str,
+                                        progress_callback: Optional[Callable[[str, float], None]]) -> Dict[str, Any]:
+        """Add speaker labels to existing SRT files via diarization (Scenario 2)."""
+        if isinstance(video_files, str):
+            video_files = [video_files]
+
+        transcript_parts = []
+        total_files = len(video_files)
+
+        for i, video_file in enumerate(video_files):
+            video_path = Path(video_file)
+            srt_path = video_path.parent / f"{video_path.stem}.srt"
+
+            if not srt_path.exists():
+                logger.warning(f"⚠️  No subtitle found next to {video_path.name}, skipping diarization")
+                continue
+
+            if progress_callback:
+                base_progress = 35 + (i / total_files) * 13
+                progress_callback(f"Diarizing {i+1}/{total_files}...", base_progress)
+
+            logger.info(f"⚡ WhisperX diarizing: {video_path.name}")
+            updated_srt = await self.whisperx_processor.add_speakers_to_existing_transcript(
+                str(srt_path), video_file, progress_callback
+            )
+            transcript_parts.append(updated_srt)
+
+        return {
+            'source': 'whisperx_diarized',
+            'transcript_path': transcript_parts[0] if len(transcript_parts) == 1 else '',
+            'transcript_parts': transcript_parts,
+        }
+
     def _get_existing_transcript_parts(self, video_files: List[str]) -> List[str]:
         """Get existing transcript parts (they should already exist from splitting)"""
         transcript_parts = []
