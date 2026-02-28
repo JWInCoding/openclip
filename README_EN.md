@@ -12,11 +12,13 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 
 ## 📢 News
 
-- **2026-02-27**: Added speaker identification (Preview) — use `--speaker-references` to automatically label speakers by name in transcripts for interviews, panels, and podcasts
+- **2026-03-01**: 
+  - Streamlit interface now supports background job processing and concurrent video processing (**open new tabs** to process multiple videos)
+  - Added [speaker identification (Preview)](#speaker-identification) — use `--speaker-references` to automatically label speakers by name in transcripts for interviews, panels, and podcasts
+  - Improved AI prompts to reduce timestamp format confusion (e.g., `00:01:55` vs `01:55:00`)
 - **2025-02-26**:
   - Switched default Qwen model from legacy qwen-turbo to qwen3.5-flash
   - Improved AI prompts to reduce timestamp hallucination and enhance title quality
-- **2025-02-16**: Added clip preview and selection — preview all generated clips before title/cover generation, deselect unwanted clips, and only process the ones you keep.
 
 ## 🎬 Demos
 
@@ -95,39 +97,6 @@ export OPENROUTER_API_KEY=your_api_key_here
 
 ### 3. Run the Pipeline
 
-### 4. Speaker Identification (Optional, Preview)
-
-> ⚠️ **Preview feature**: Speaker identification is in preview. Behavior and interface may change in future releases.
-
-For interviews, panels, debates, podcasts, and any multi-speaker video. When enabled, each line in the transcript is prefixed with the speaker's name, e.g. `[Host] Welcome to today's show`.
-
-**Step 1: Install extra dependencies**
-```bash
-uv sync --extra speakers
-```
-
-**Step 2: Set your HuggingFace Token**
-```bash
-export HUGGINGFACE_TOKEN=hf_your_token_here
-```
-And accept the [pyannote model agreement](https://huggingface.co/pyannote/speaker-diarization-community-1) on HuggingFace.
-
-**Step 3: Extract reference audio**
-
-Cut a short clip of each speaker from your video (10–30 seconds, single speaker, clean audio):
-```bash
-uv run python tools/extract_reference.py VIDEO START END "references/Name.wav"
-
-# Examples
-uv run python tools/extract_reference.py interview.mp4 00:01:23 00:01:50 "references/Host.wav"
-uv run python tools/extract_reference.py interview.mp4 00:03:10 00:03:40 "references/Guest.wav"
-```
-
-**Step 4: Run**
-```bash
-uv run python video_orchestrator.py --speaker-references references/ "VIDEO_URL_OR_PATH"
-```
-
 #### Option A: Using Streamlit Web Interface
 
 **Start Streamlit app:**
@@ -145,6 +114,10 @@ Once the app starts, open your browser and visit the displayed URL (typically `h
 5. Preview generated clips and covers in the results section
 
 **Advantages:** No need to remember command-line parameters, provides visual operation interface, suitable for all users.
+
+**Concurrent Processing:** The Streamlit interface supports processing multiple video tasks simultaneously:
+- Click "Process Video" to start the first task → automatically tracked
+- **Open a new tab** to start the second task → independently tracked in the new tab
 
 #### Option B: Using AI Agent Skills
 
@@ -173,6 +146,48 @@ uv run python video_orchestrator.py "/path/to/video.mp4"
 ```
 
 > To use existing subtitles, place the `.srt` file in the same directory with the same filename (e.g. `video.mp4` → `video.srt`).
+
+<a id="speaker-identification"></a>
+<details>
+<summary>🎙️ Speaker Identification (Optional, Preview)</summary>
+
+> ⚠️ **Preview feature**: Speaker identification is in preview. Behavior and interface may change in future releases.
+
+For interviews, panels, debates, podcasts, and any multi-speaker video. When enabled, each line in the transcript is prefixed with the speaker's name, e.g. `[Host] Welcome to today's show`. This gives the AI richer context during highlight analysis — making it better at identifying the most engaging exchanges between specific speakers, rather than treating all speech as undifferentiated.
+
+**Step 1: Install extra dependencies**
+
+```bash
+uv sync --extra speakers
+```
+
+**Step 2: Set your HuggingFace Token**
+
+```bash
+export HUGGINGFACE_TOKEN=hf_your_token_here
+```
+
+And accept the [pyannote model agreement](https://huggingface.co/pyannote/speaker-diarization-community-1) on HuggingFace.
+
+**Step 3: Extract reference audio**
+
+Cut a short clip of each speaker from your video (10–30 seconds, single speaker, clean audio):
+
+```bash
+uv run python tools/extract_reference.py VIDEO START END "references/Name.wav"
+
+# Examples
+uv run python tools/extract_reference.py interview.mp4 00:01:23 00:01:50 "references/Host.wav"
+uv run python tools/extract_reference.py interview.mp4 00:03:10 00:03:40 "references/Guest.wav"
+```
+
+**Step 4: Run**
+
+```bash
+uv run python video_orchestrator.py --speaker-references references/ "VIDEO_URL_OR_PATH"
+```
+
+</details>
 
 ## 📖 CLI Arguments
 

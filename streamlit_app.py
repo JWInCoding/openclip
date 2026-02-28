@@ -17,6 +17,10 @@ from typing import Optional, Dict, Any
 # Import the video orchestrator
 from video_orchestrator import VideoOrchestrator
 from core.config import API_KEY_ENV_VARS, DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, LLM_CONFIG
+from core.transcript_generation_whisperx import WHISPERX_AVAILABLE
+
+# Import job manager for background processing
+from job_manager import get_job_manager, JobStatus
 
 # Set page config
 st.set_page_config(
@@ -102,13 +106,11 @@ TRANSLATIONS = {
         'use_background_help': 'Use background information from prompts/background/background.md',
         'use_custom_prompt_help': 'Use custom prompt for highlight analysis',
         'advanced_config_notice': 'For advanced options (e.g. video split duration, Whisper model), edit `core/config.py`.',
-        'clip_preview_title': 'Preview Generated Clips',
-        'clip_preview_desc': 'Review the clips below. Uncheck any clips you don\'t want to include in title/cover generation.',
-        'continue_with_clips': 'Continue with {count}/{total} clips',
-        'skip_titles_covers': 'Skip Titles & Covers',
-        'select_deselect_all': 'Select / Deselect All',
-        'no_clips_selected': 'No clips selected. Select at least one clip to continue, or click "Skip" to finish.',
-        'phase2_adding_titles_notice': 'Adding titles and generating covers for selected clips... This may take a few minutes.',
+        'speaker_references': 'Speaker References Directory (Preview)',
+        'speaker_references_help': 'Directory of reference audio clips for speaker name mapping. Filename stem becomes the speaker name (e.g. references/Host.wav → "Host"). Requires HUGGINGFACE_TOKEN env var.',
+        'speaker_references_unavailable': 'Speaker Identification (Preview) — requires extra dependencies: `uv sync --extra speakers`',
+        'speaker_references_dir_not_found': '⚠️ Directory not found. Please check the path.',
+        'speaker_references_token_warning': '⚠️ HUGGINGFACE_TOKEN is not set. Speaker identification will fail at runtime.',
     },
     'zh': {
         'app_title': 'OpenClip',
@@ -179,13 +181,11 @@ TRANSLATIONS = {
         'use_background_help': '使用 prompts/background/background.md 中的背景信息',
         'use_custom_prompt_help': '使用自定义提示进行高光分析',
         'advanced_config_notice': '如需调整高级选项（如视频分割时长、Whisper 模型），请编辑 `core/config.py`。',
-        'clip_preview_title': '预览生成的片段',
-        'clip_preview_desc': '查看下方片段，取消勾选不需要添加标题和封面的片段。',
-        'continue_with_clips': '继续处理 {count}/{total} 个片段',
-        'skip_titles_covers': '跳过标题和封面',
-        'select_deselect_all': '全选 / 取消全选',
-        'no_clips_selected': '未选择任何片段。请至少选择一个片段继续，或点击"跳过"完成。',
-        'phase2_adding_titles_notice': '正在为选中的片段添加标题和生成封面……这可能需要几分钟。',
+        'speaker_references': '说话人参考音频目录（预览版）',
+        'speaker_references_help': '包含参考音频片段的目录，用于说话人姓名映射。文件名即说话人姓名（如 references/Host.wav → "Host"）。需要设置 HUGGINGFACE_TOKEN 环境变量。',
+        'speaker_references_unavailable': '说话人识别（预览版）— 需要额外依赖：`uv sync --extra speakers`',
+        'speaker_references_dir_not_found': '⚠️ 目录不存在，请检查路径。',
+        'speaker_references_token_warning': '⚠️ 未设置 HUGGINGFACE_TOKEN，运行时说话人识别将失败。',
     }
 }
 
@@ -209,12 +209,11 @@ DEFAULT_DATA = {
     'output_dir': "processed_videos",
     'custom_prompt_file': None,
     'custom_prompt_text': "",
+    'speaker_references_dir': "",
     # Language setting
     'ui_language': "zh",
     # Processing result
     'processing_result': None,
-    # Clip preview state (for refresh persistence)
-    'clip_preview_state': None
 }
 
 # Initialize file if it doesn't exist
@@ -275,36 +274,16 @@ if 'processing' not in st.session_state:
     st.session_state.processing_outcome = {'result': None, 'error': None}
     st.session_state.progress_state = {'status': '', 'progress': 0}
 
-# Initialize clip preview/selection state (two-phase processing)
-if 'clip_preview_mode' not in st.session_state:
-    # Try to restore from persistent storage
-    saved_preview_state = data.get('clip_preview_state')
-    if saved_preview_state:
-        st.session_state.clip_preview_mode = saved_preview_state.get('clip_preview_mode', False)
-        
-        # Convert phase1_result dict back to object
-        phase1_result_dict = saved_preview_state.get('phase1_result')
-        if phase1_result_dict:
-            class ResultObject:
-                def __init__(self, data):
-                    for key, value in data.items():
-                        setattr(self, key, value)
-            st.session_state.phase1_result = ResultObject(phase1_result_dict)
-        else:
-            st.session_state.phase1_result = None
-        
-        st.session_state.phase1_params = saved_preview_state.get('phase1_params')
-        st.session_state.clip_selections = saved_preview_state.get('clip_selections', {})
-    else:
-        st.session_state.clip_preview_mode = False
-        st.session_state.phase1_result = None
-        st.session_state.phase1_params = None
-        st.session_state.clip_selections = {}
-    
-    st.session_state.phase2_processing = False
-    st.session_state.phase2_thread = None
-    st.session_state.phase2_outcome = {'result': None, 'error': None}
-    st.session_state.phase2_progress = {'status': '', 'progress': 0}
+# Initialize job manager
+job_manager = get_job_manager()
+
+# Initialize processing job tracking (supports multiple concurrent jobs)
+if 'processing_job_ids' not in st.session_state:
+    st.session_state.processing_job_ids = []
+    st.session_state.processing = False
+
+# Don't auto-resume tracking on new tabs - let user choose via "Watch Progress" button
+# This allows each tab to track different jobs independently
 
 # Track if we just processed a video
 just_processed = False
@@ -591,6 +570,25 @@ with st.sidebar:
     )
     data['output_dir'] = output_dir
 
+    # Speaker Identification (Preview)
+    if not WHISPERX_AVAILABLE:
+        st.info(t['speaker_references_unavailable'])
+        speaker_references_dir = ""
+    else:
+        speaker_references_dir = st.text_input(
+            t['speaker_references'],
+            value=data.get('speaker_references_dir', ''),
+            help=t['speaker_references_help'],
+            placeholder="references/",
+            key=f"speaker_references_dir_{st.session_state.reset_counter}",
+        )
+        if speaker_references_dir:
+            if not Path(speaker_references_dir).is_dir():
+                st.caption(t['speaker_references_dir_not_found'])
+            elif not os.getenv('HUGGINGFACE_TOKEN'):
+                st.caption(t['speaker_references_token_warning'])
+    data['speaker_references_dir'] = speaker_references_dir
+
     # Checkboxes for additional options
     add_titles = st.checkbox(
         t['add_titles'],
@@ -644,9 +642,39 @@ with st.sidebar:
 
     st.caption(t['advanced_config_notice'])
 
-    # Start Over button in sidebar
+    # Save data to file
+    save_to_file(data)
+    
+    # ============================================================================
+    # PROCESS VIDEO BUTTON (in sidebar)
+    # ============================================================================
     st.divider()
-    if st.button(t['reset_form']):
+    
+    # Get API key from input or environment
+    resolved_api_key = api_key or os.getenv(api_key_env_var)
+    
+    # Check if we can process (allow concurrent jobs)
+    can_process = bool(video_source and resolved_api_key)
+    
+    # Process Video and Reset Form buttons on same row
+    btn_col1, btn_col2 = st.columns(2)
+    
+    with btn_col1:
+        process_clicked = st.button(
+            t['process_video'],
+            disabled=not can_process,
+            type="primary",
+            use_container_width=True
+        )
+    
+    with btn_col2:
+        reset_clicked = st.button(
+            t['reset_form'],
+            use_container_width=True
+        )
+    
+    # Handle reset button
+    if reset_clicked:
         # Reset all data to defaults
         for key, value in DEFAULT_DATA.items():
             data[key] = value
@@ -656,12 +684,119 @@ with st.sidebar:
         # Force a rerun
         st.rerun()
 
-    # Save data to file
-    save_to_file(data)
-
 # Main content area
-st.header("▶️ Process Video")
 
+# ============================================================================
+# JOB LIST SECTION
+# ============================================================================
+st.header("📋 Your Jobs")
+
+jobs = job_manager.list_jobs(limit=20)
+
+if jobs:
+    # Show stats
+    stats = job_manager.get_stats()
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total", stats['total'])
+    col2.metric("Processing", stats['processing'])
+    col3.metric("Completed", stats['completed'])
+    col4.metric("Failed", stats['failed'])
+    
+    st.divider()
+    
+    # Show each job
+    for job in jobs:
+        status_emoji = {
+            'pending': '⏳',
+            'processing': '🔄',
+            'completed': '✅',
+            'failed': '❌',
+            'cancelled': '⏹️'
+        }.get(job.status.value, '❓')
+        
+        # Truncate video source for display
+        display_source = job.video_source if len(job.video_source) <= 60 else job.video_source[:57] + '...'
+        
+        with st.expander(f"{status_emoji} {job.status.value.upper()} - {display_source}", expanded=(job.status.value == 'processing')):
+            col1, col2, col3 = st.columns([2, 2, 1])
+            
+            with col1:
+                st.write(f"**Job ID:** `{job.id[:8]}...`")
+                st.write(f"**Created:** {job.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Create a placeholder for duration to prevent ghost rendering
+                duration_placeholder = st.empty()
+                
+                # Only show duration for finished jobs
+                if job.status.value in ['completed', 'failed', 'cancelled']:
+                    if job.completed_at and job.started_at:
+                        duration = (job.completed_at - job.started_at).total_seconds()
+                        duration_placeholder.write(f"**Duration:** {duration:.1f}s")
+                else:
+                    # Explicitly clear the placeholder for processing/pending jobs
+                    duration_placeholder.empty()
+            
+            with col2:
+                if job.status.value == 'processing':
+                    st.progress(job.progress / 100)
+                    st.caption(f"{job.current_step}")
+                elif job.status.value == 'completed':
+                    st.success("Processing completed!")
+                    if job.result and job.result.get('processing_time'):
+                        st.write(f"**Time:** {job.result['processing_time']:.1f}s")
+                elif job.status.value == 'failed':
+                    st.error(f"Error: {job.error}")
+                elif job.status.value == 'cancelled':
+                    st.warning("Job was cancelled")
+            
+            with col3:
+                # Use placeholder to prevent ghost buttons
+                button_placeholder = st.empty()
+                
+                if job.status.value == 'completed':
+                    # Show View and Delete buttons
+                    with button_placeholder.container():
+                        if st.button("📊 View", key=f"view_{job.id}", use_container_width=True):
+                            # Load result and display
+                            data['processing_result'] = job.result
+                            save_to_file(data)
+                            st.rerun()
+                        if st.button("🗑️ Delete", key=f"delete_{job.id}", use_container_width=True):
+                            job_manager.delete_job(job.id)
+                            st.rerun()
+                elif job.status.value == 'processing':
+                    with button_placeholder.container():
+                        # Check if this job is being tracked
+                        is_tracked = job.id in st.session_state.processing_job_ids
+                        
+                        if is_tracked:
+                            # Show "Watching" indicator (disabled button)
+                            st.button("✓ Watching", key=f"watching_{job.id}", use_container_width=True, disabled=True)
+                        else:
+                            # Show "Watch Progress" button
+                            if st.button("👁️ Watch Progress", key=f"watch_{job.id}", use_container_width=True):
+                                # Start tracking this job
+                                st.session_state.processing_job_ids = [job.id]
+                                st.session_state.processing = True
+                                st.rerun()
+                        
+                        # Always show Cancel button
+                        if st.button("⏹️ Cancel", key=f"cancel_{job.id}", use_container_width=True):
+                            job_manager.cancel_job(job.id)
+                            st.rerun()
+                elif job.status.value in ['failed', 'cancelled', 'pending']:
+                    with button_placeholder.container():
+                        if st.button("🗑️ Delete", key=f"delete_{job.id}", use_container_width=True):
+                            job_manager.delete_job(job.id)
+                            st.rerun()
+else:
+    st.info("No jobs yet. Process a video below to get started!")
+
+st.divider()
+
+# ============================================================================
+# CUSTOM PROMPT EDITOR (if enabled)
+# ============================================================================
 # Custom prompt editor (shown only if use_custom_prompt is checked)
 custom_prompt_file = data.get('custom_prompt_file')
 if use_custom_prompt:
@@ -714,161 +849,87 @@ if use_custom_prompt:
     # Show current saved prompt file if exists
     if custom_prompt_file and Path(custom_prompt_file).exists():
         st.info(f"{t['current_saved_prompt']} {Path(custom_prompt_file).name}")
+    
+    st.divider()
 
-# Progress bar and status — restore last known state so widgets don't reset on rerun
-_ps = st.session_state.progress_state
-progress_bar = st.progress(min(int(_ps['progress']), 100))
-status_text = st.empty()
-if _ps['status']:
-    status_text.text(_ps['status'])
-    # Show notice when adding titles (this step is slow)
-    if "Adding titles" in _ps['status']:
-        st.info("⏳ Adding titles to clips... This step may take a few minutes. Please be patient.")
+# ============================================================================
+# CHECK CURRENT JOB STATUS (must be before progress display)
+# ============================================================================
+# Check all processing jobs for completion
+completed_jobs = []
+for job_id in st.session_state.processing_job_ids[:]:  # Copy list to iterate safely
+    job = job_manager.get_job(job_id)
+    if job:
+        # Check if job finished
+        if job.status.value in ['completed', 'failed', 'cancelled']:
+            completed_jobs.append(job)
+            st.session_state.processing_job_ids.remove(job_id)
 
-# Process Video / Cancel buttons
-btn_col1, btn_col2 = st.columns([3, 1])
-is_processing = st.session_state.processing
+# Show completion messages for finished jobs
+for job in completed_jobs:
+    if job.status.value == 'completed':
+        st.success(f"✅ Job completed: {job.video_source[:50]}...")
+        # Load result into saved results (only the last completed job)
+        data['processing_result'] = job.result
+        save_to_file(data)
+    elif job.status.value == 'failed':
+        st.error(f"❌ Job failed: {job.video_source[:50]}... - {job.error}")
+    elif job.status.value == 'cancelled':
+        st.warning(f"⏹️ Job cancelled: {job.video_source[:50]}...")
 
-with btn_col1:
-    process_clicked = st.button(
-        t['process_video'],
-        disabled=not video_source or is_processing
+# Update processing state
+st.session_state.processing = len(st.session_state.processing_job_ids) > 0
+
+# Rerun if we just completed jobs to update the UI
+if completed_jobs:
+    time.sleep(2)
+    st.rerun()
+
+# Auto-refresh while processing (at the end of script)
+if st.session_state.processing:
+    time.sleep(2)
+    st.rerun()
+
+# ============================================================================
+# WORKER FUNCTION FOR BACKGROUND PROCESSING
+# ============================================================================
+def process_video_worker(job, progress_callback):
+    """
+    Worker function that processes video for a job
+    This runs in a background thread managed by JobManager
+    """
+    options = job.options
+    
+    orchestrator = VideoOrchestrator(
+        output_dir=options['output_dir'],
+        max_duration_minutes=options['max_duration_minutes'],
+        whisper_model=options['whisper_model'],
+        browser="firefox",
+        api_key=options['api_key'],
+        llm_provider=options['llm_provider'],
+        skip_analysis=False,
+        generate_clips=options['generate_clips'],
+        add_titles=options['add_titles'],
+        title_style=options['title_style'],
+        use_background=options['use_background'],
+        generate_cover=options['generate_cover'],
+        language=options['language'],
+        debug=False,
+        custom_prompt_file=options.get('custom_prompt_file'),
+        max_clips=options['max_clips'],
+        enable_diarization=bool(options.get('speaker_references_dir')),
+        speaker_references_dir=options.get('speaker_references_dir'),
     )
-
-with btn_col2:
-    cancel_clicked = st.button(
-        t['cancel'],
-        disabled=not is_processing
-    )
-
-# --- Handle Cancel ---
-if cancel_clicked and is_processing:
-    st.session_state.cancel_event.set()
-    status_text.text("⏹️ Cancelling...")
-
-# --- Handle Start ---
-if process_clicked and not is_processing:
-    if not video_source:
-        st.error("Please provide a video URL or upload a file")
-    else:
-        # Get API key from input or environment
-        resolved_api_key = api_key or os.getenv(api_key_env_var)
-
-        if not resolved_api_key:
-            st.error(f"Please provide {llm_provider.upper()} API key or set the {api_key_env_var} environment variable")
-        else:
-            # Reset cancel event and state
-            st.session_state.cancel_event = threading.Event()
-            st.session_state.processing_outcome = {'result': None, 'error': None}
-            st.session_state.progress_state = {'status': '', 'progress': 0}
-
-            _cancel_event = st.session_state.cancel_event
-            # Grab direct references so the background thread can
-            # mutate dicts in-place without needing st.session_state.
-            _progress = st.session_state.progress_state
-            _outcome = st.session_state.processing_outcome
-
-            # Build progress callback with cancellation check.
-            # Mutates _progress dict in-place — the main thread reads
-            # the same object on each rerun to render the widgets.
-            def progress_callback(status: str, progress: float):
-                if _cancel_event.is_set():
-                    raise Exception("Processing cancelled by user")
-                clean_status = re.sub(r'\x1b\[[0-9;]*m', '', status)
-                _progress['status'] = f"🔄 {clean_status} ({progress:.1f}%)"
-                _progress['progress'] = progress
-
-            # Determine if we need the clip preview step
-            # Preview is shown when clips are generated AND titles or covers are requested
-            needs_preview = generate_clips and (add_titles or generate_cover)
-
-            if needs_preview:
-                # Save original prefs for Phase 2; disable titles/covers in Phase 1
-                st.session_state.phase1_params = {
-                    'add_titles': add_titles,
-                    'generate_cover': generate_cover,
-                    'title_style': title_style,
-                    'output_dir': output_dir,
-                    'api_key': resolved_api_key,
-                    'llm_provider': llm_provider,
-                    'language': language,
-                    'use_background': use_background,
-                    'max_clips': max_clips,
-                }
-            else:
-                st.session_state.phase1_params = None
-
-            # Snapshot all parameters for the background thread
-            _params = dict(
-                output_dir=output_dir,
-                max_duration_minutes=MAX_DURATION_MINUTES,
-                whisper_model=WHISPER_MODEL,
-                api_key=resolved_api_key,
-                llm_provider=llm_provider,
-                generate_clips=generate_clips,
-                add_titles=False if needs_preview else add_titles,
-                title_style=title_style,
-                use_background=use_background,
-                generate_cover=False if needs_preview else generate_cover,
-                language=language,
-                custom_prompt_file=custom_prompt_file,
-                max_clips=max_clips,
-                video_source=video_source,
-                force_whisper=force_whisper,
-            )
-
-            def _run_processing():
-                try:
-                    p = _params
-                    orchestrator = VideoOrchestrator(
-                        output_dir=p['output_dir'],
-                        max_duration_minutes=p['max_duration_minutes'],
-                        whisper_model=p['whisper_model'],
-                        browser="firefox",
-                        api_key=p['api_key'],
-                        llm_provider=p['llm_provider'],
-                        skip_analysis=False,
-                        generate_clips=p['generate_clips'],
-                        add_titles=p['add_titles'],
-                        title_style=p['title_style'],
-                        use_background=p['use_background'],
-                        generate_cover=p['generate_cover'],
-                        language=p['language'],
-                        debug=False,
-                        custom_prompt_file=p['custom_prompt_file'],
-                        max_clips=p['max_clips'],
-                    )
-                    result = asyncio.run(orchestrator.process_video(
-                        p['video_source'],
-                        force_whisper=p['force_whisper'],
-                        skip_download=False,
-                        progress_callback=progress_callback,
-                    ))
-                    _outcome['result'] = result
-                except Exception as e:
-                    _outcome['error'] = e
-
-            thread = threading.Thread(target=_run_processing, daemon=True)
-            st.session_state.processing_thread = thread
-            st.session_state.processing = True
-            status_text.text("Starting video processing...")
-            thread.start()
-            st.rerun()
-
-# --- Polling loop while processing ---
-if is_processing:
-    thread = st.session_state.processing_thread
-    if thread is not None and thread.is_alive():
-        time.sleep(0.5)
-        st.rerun()
-    else:
-        # Thread finished — update state and rerun so buttons re-render correctly
-        st.session_state.processing = False
-        st.rerun()
-
-# --- Helper to save and display final results ---
-def _finalize_results(result):
-    data['processing_result'] = {
+    
+    result = asyncio.run(orchestrator.process_video(
+        job.video_source,
+        force_whisper=options['force_whisper'],
+        skip_download=False,
+        progress_callback=progress_callback,
+    ))
+    
+    # Convert result to dict for JSON serialization
+    return {
         'success': result.success,
         'error_message': getattr(result, 'error_message', None),
         'processing_time': getattr(result, 'processing_time', None),
@@ -879,259 +940,75 @@ def _finalize_results(result):
         'title_addition': getattr(result, 'title_addition', None),
         'cover_generation': getattr(result, 'cover_generation', None),
     }
-    save_to_file(data)
 
-# --- Helper to save clip preview state for refresh persistence ---
-def _save_clip_preview_state():
-    """Save clip preview state to persistent storage so it survives page refresh"""
-    # Only save essential data from phase1_result to avoid huge JSON files
-    phase1_result_dict = None
-    if st.session_state.phase1_result:
-        result = st.session_state.phase1_result
-        # Only save the clip generation info which is needed for preview
-        phase1_result_dict = {
+# ============================================================================
+# BUTTON CLICK HANDLERS
+# ============================================================================
+
+# --- Handle Start ---
+if process_clicked:
+    if not video_source:
+        st.error("Please provide a video URL or file path")
+    elif not resolved_api_key:
+        st.error(f"Please provide {llm_provider.upper()} API key or set the {api_key_env_var} environment variable")
+    else:
+        # Create job options
+        job_options = {
+            'output_dir': output_dir,
+            'max_duration_minutes': MAX_DURATION_MINUTES,
+            'whisper_model': WHISPER_MODEL,
+            'api_key': resolved_api_key,
+            'llm_provider': llm_provider,
+            'generate_clips': generate_clips,
+            'add_titles': add_titles,
+            'title_style': title_style,
+            'use_background': use_background,
+            'generate_cover': generate_cover,
+            'language': language,
+            'custom_prompt_file': custom_prompt_file,
+            'max_clips': max_clips,
+            'force_whisper': force_whisper,
+            'speaker_references_dir': speaker_references_dir or None,
+        }
+        
+        # Create and start job
+        job_id = job_manager.create_job(video_source, job_options)
+        job_manager.start_job(job_id, process_video_worker)
+        
+        # Auto-track this job only if no jobs are currently being tracked
+        if not st.session_state.processing_job_ids:
+            st.session_state.processing_job_ids = [job_id]
+            st.session_state.processing = True
+        
+        st.success(f"✅ Job started! ID: `{job_id[:8]}...`")
+        
+        # Show different message based on tracking state
+        if job_id in st.session_state.processing_job_ids:
+            st.info("💡 This job is being tracked. You can close this page and come back later.")
+        else:
+            st.info("💡 Job is running in background. Click 'Watch Progress' in the job card to track it.")
+        
+        time.sleep(1)
+        st.rerun()
+
+# --- Helper to save and display final results ---
+def _finalize_results(result):
+    # Convert result object to dict if needed
+    if not isinstance(result, dict):
+        result = {
             'success': result.success,
-            'clip_generation': getattr(result, 'clip_generation', None),
+            'error_message': getattr(result, 'error_message', None),
+            'processing_time': getattr(result, 'processing_time', None),
+            'video_info': getattr(result, 'video_info', None),
+            'transcript_source': getattr(result, 'transcript_source', None),
             'engaging_moments_analysis': getattr(result, 'engaging_moments_analysis', None),
+            'clip_generation': getattr(result, 'clip_generation', None),
+            'title_addition': getattr(result, 'title_addition', None),
+            'cover_generation': getattr(result, 'cover_generation', None),
         }
     
-    data['clip_preview_state'] = {
-        'clip_preview_mode': st.session_state.clip_preview_mode,
-        'phase1_result': phase1_result_dict,
-        'phase1_params': st.session_state.phase1_params,
-        'clip_selections': st.session_state.clip_selections,
-    }
-    try:
-        save_to_file(data)
-    except Exception as e:
-        # Log error but don't crash the app
-        print(f"Warning: Failed to save clip preview state: {e}")
-
-# --- Helper to clear clip preview state ---
-def _clear_clip_preview_state():
-    """Clear clip preview state from both session and persistent storage"""
-    st.session_state.clip_preview_mode = False
-    st.session_state.phase1_result = None
-    st.session_state.phase1_params = None
-    st.session_state.clip_selections = {}
-    data['clip_preview_state'] = None
+    data['processing_result'] = result
     save_to_file(data)
-
-# --- Handle finished processing result (runs on the rerun after thread completes) ---
-_outcome = st.session_state.processing_outcome
-_finished_result = _outcome['result']
-_finished_error = _outcome['error']
-if not is_processing and (_finished_result is not None or _finished_error is not None):
-    # Clear stored outcome so this block only runs once
-    _outcome['result'] = None
-    _outcome['error'] = None
-
-    if _finished_error is not None:
-        st.error(f"❌ Unexpected error: {str(_finished_error)}")
-    elif _finished_result is not None:
-        if getattr(_finished_result, 'error_message', None) and 'cancelled' in _finished_result.error_message.lower():
-            st.warning("⏹️ Processing was cancelled.")
-        elif _finished_result.success:
-            # Check if we need the clip preview step
-            clip_gen = getattr(_finished_result, 'clip_generation', None)
-            has_clips = clip_gen and clip_gen.get('success') and clip_gen.get('clips_info')
-            if st.session_state.phase1_params and has_clips:
-                # Enter clip preview mode instead of showing final results
-                st.session_state.clip_preview_mode = True
-                st.session_state.phase1_result = _finished_result
-                st.session_state.clip_selections = {
-                    i: True for i in range(len(clip_gen['clips_info']))
-                }
-                # Save state to persistent storage for refresh persistence
-                _save_clip_preview_state()
-                st.rerun()
-            else:
-                # No preview needed — finalize directly
-                _finalize_results(_finished_result)
-                st.header("📊 Results")
-                display_results(_finished_result)
-                just_processed = True
-        else:
-            st.error(f"❌ Processing failed: {getattr(_finished_result, 'error_message', 'Unknown error')}")
-
-# --- Clip Preview UI (between Phase 1 and Phase 2) ---
-if st.session_state.clip_preview_mode and not st.session_state.phase2_processing:
-    phase1_result = st.session_state.phase1_result
-    clip_gen = phase1_result.clip_generation
-
-    if clip_gen and clip_gen.get('clips_info'):
-        st.header(t['clip_preview_title'])
-        st.write(t['clip_preview_desc'])
-
-        clips_info = clip_gen['clips_info']
-        output_dir_path = Path(clip_gen.get('output_dir', ''))
-
-        # Clean up clip_selections to only include valid indices
-        valid_indices = set(range(len(clips_info)))
-        st.session_state.clip_selections = {
-            i: v for i, v in st.session_state.clip_selections.items() 
-            if i in valid_indices
-        }
-        # Ensure all clips have a selection state (default to True)
-        for i in valid_indices:
-            if i not in st.session_state.clip_selections:
-                st.session_state.clip_selections[i] = True
-
-        # Display clips in 2-column grid with checkboxes
-        cols = st.columns(2, gap="small")
-        for i, clip in enumerate(clips_info):
-            clip_filename = clip.get('filename')
-            if clip_filename:
-                clip_path = output_dir_path / clip_filename
-                if clip_path.exists():
-                    with cols[i % 2]:
-                        title = clip.get('title', 'Untitled')
-                        rank = clip.get('rank', i + 1)
-                        # Truncate title to keep checkbox labels single-line
-                        max_label_len = 25
-                        short_title = title if len(title) <= max_label_len else title[:max_label_len] + '...'
-                        selected = st.checkbox(
-                            f"Rank {rank}: {short_title}",
-                            value=st.session_state.clip_selections.get(i, True),
-                            key=f"clip_select_{i}"
-                        )
-                        # Update selection and save state if changed
-                        if st.session_state.clip_selections.get(i) != selected:
-                            st.session_state.clip_selections[i] = selected
-                            _save_clip_preview_state()
-                        st.video(str(clip_path), width=450)
-                        duration = clip.get('duration', 'N/A')
-                        engagement = clip.get('engagement_level', 'N/A')
-                        st.caption(f"**{title}** | Duration: {duration} | Engagement: {engagement}")
-
-        # Count selected clips - only count valid indices
-        selected_count = sum(1 for i, v in st.session_state.clip_selections.items() if i in valid_indices and v)
-        total_count = len(clips_info)
-
-        # Action buttons
-        btn_col1, btn_col2, btn_col3 = st.columns([2, 2, 2])
-
-        with btn_col1:
-            continue_label = t['continue_with_clips'].format(count=selected_count, total=total_count)
-            continue_clicked = st.button(
-                continue_label,
-                disabled=(selected_count == 0),
-                type="primary"
-            )
-
-        with btn_col2:
-            skip_clicked = st.button(t['skip_titles_covers'])
-
-        with btn_col3:
-            toggle_clicked = st.button(t['select_deselect_all'])
-
-        if toggle_clicked:
-            all_selected = all(st.session_state.clip_selections.values())
-            for k in st.session_state.clip_selections:
-                st.session_state.clip_selections[k] = not all_selected
-            _save_clip_preview_state()
-            st.rerun()
-
-        if selected_count == 0:
-            st.warning(t['no_clips_selected'])
-
-        if skip_clicked:
-            # Finalize with Phase 1 results only (no titles/covers)
-            _finalize_results(phase1_result)
-            _clear_clip_preview_state()
-            st.rerun()
-
-        if continue_clicked and selected_count > 0:
-            # Collect selected ranks and launch Phase 2
-            selected_indices = [
-                i for i, sel in st.session_state.clip_selections.items() if sel
-            ]
-            selected_ranks = [clips_info[i]['rank'] for i in selected_indices]
-
-            p1_params = st.session_state.phase1_params
-            engaging_result = phase1_result.engaging_moments_analysis
-
-            st.session_state.phase2_processing = True
-            st.session_state.phase2_outcome = {'result': None, 'error': None}
-            st.session_state.phase2_progress = {'status': '', 'progress': 0}
-
-            _p2_progress = st.session_state.phase2_progress
-            _p2_outcome = st.session_state.phase2_outcome
-            _cancel_event = st.session_state.cancel_event
-
-            def _phase2_progress_cb(status, progress):
-                if _cancel_event.is_set():
-                    raise Exception("Processing cancelled by user")
-                clean = re.sub(r'\x1b\[[0-9;]*m', '', status)
-                _p2_progress['status'] = f"🔄 {clean} ({progress:.1f}%)"
-                _p2_progress['progress'] = progress
-
-            _p2_selected_ranks = selected_ranks
-            _p2_phase1_result = phase1_result
-            _p2_engaging_result = engaging_result
-            _p2_params = p1_params
-
-            def _run_phase2():
-                try:
-                    orchestrator = VideoOrchestrator(
-                        output_dir=_p2_params['output_dir'],
-                        add_titles=_p2_params['add_titles'],
-                        title_style=_p2_params['title_style'],
-                        generate_cover=_p2_params['generate_cover'],
-                        api_key=_p2_params['api_key'],
-                        llm_provider=_p2_params['llm_provider'],
-                        language=_p2_params['language'],
-                        use_background=_p2_params['use_background'],
-                        max_clips=_p2_params['max_clips'],
-                        generate_clips=False,
-                        skip_analysis=True,
-                    )
-                    result = orchestrator.process_titles_and_covers(
-                        _p2_phase1_result,
-                        _p2_engaging_result,
-                        _p2_selected_ranks,
-                        progress_callback=_phase2_progress_cb,
-                    )
-                    _p2_outcome['result'] = result
-                except Exception as e:
-                    _p2_outcome['error'] = e
-
-            thread = threading.Thread(target=_run_phase2, daemon=True)
-            st.session_state.phase2_thread = thread
-            thread.start()
-            st.rerun()
-
-# --- Phase 2 polling loop ---
-if st.session_state.phase2_processing:
-    p2_ps = st.session_state.phase2_progress
-    progress_bar.progress(min(int(p2_ps['progress']), 100))
-    if p2_ps['status']:
-        status_text.text(p2_ps['status'])
-        if "Adding titles" in p2_ps['status']:
-            st.info(t['phase2_adding_titles_notice'])
-
-    thread = st.session_state.phase2_thread
-    if thread is not None and thread.is_alive():
-        time.sleep(0.5)
-        st.rerun()
-    else:
-        # Phase 2 finished
-        st.session_state.phase2_processing = False
-        p2_outcome = st.session_state.phase2_outcome
-
-        if p2_outcome.get('error'):
-            st.error(f"❌ Error: {p2_outcome['error']}")
-        elif p2_outcome.get('result'):
-            merged_result = p2_outcome['result']
-            _finalize_results(merged_result)
-            st.header("📊 Results")
-            display_results(merged_result)
-            just_processed = True
-
-        # Clean up preview state
-        _clear_clip_preview_state()
-        st.session_state.phase2_outcome = {'result': None, 'error': None}
-        st.session_state.phase2_progress = {'status': '', 'progress': 0}
 
 # Display saved results if they exist and we didn't just process a video
 if data['processing_result'] and not just_processed:
@@ -1202,3 +1079,20 @@ with col2:
         </button>
     </a>
     """, unsafe_allow_html=True)
+
+# ============================================================================
+# AUTO-REFRESH WHILE PROCESSING
+# ============================================================================
+# This must be at the very end to refresh the entire page
+if st.session_state.processing:
+    # Track last refresh time to avoid too frequent updates
+    if 'last_refresh_time' not in st.session_state:
+        st.session_state.last_refresh_time = 0
+    
+    current_time = time.time()
+    time_since_refresh = current_time - st.session_state.last_refresh_time
+    
+    # Only refresh if at least 2 seconds have passed
+    if time_since_refresh >= 2:
+        st.session_state.last_refresh_time = current_time
+        st.rerun()

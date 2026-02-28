@@ -12,11 +12,13 @@
 
 ## 📢 最新动态
 
-- **2026-02-27**: 新增说话人识别功能（预览版）— 使用 `--speaker-references` 为访谈/座谈/播客视频自动标注说话人姓名
+- **2026-03-01**: 
+  - Streamlit 界面支持后台任务处理和并发处理多个视频（**打开新标签页**同时处理）
+  - 新增[说话人识别功能（预览版）](#speaker-identification)— 使用 `--speaker-references` 为访谈/座谈/播客视频自动标注说话人姓名
+  - 优化 AI 提示词，减少时间戳格式混淆（如 `00:01:55` vs `01:55:00`）
 - **2025-02-26**:
   - 默认 Qwen 模型从旧版 qwen-turbo 切换至 qwen3.5-flash
   - 优化 AI 提示词，减少时间戳幻觉，提升标题质量
-- **2025-02-16**: 新增剪辑预览与筛选功能 — 在生成标题和封面之前，可以先预览所有剪辑片段，取消不需要的片段后再继续处理。
 
 ## 🎬 演示
 
@@ -95,39 +97,6 @@ export OPENROUTER_API_KEY=your_api_key_here
 
 ### 3. 运行流水线
 
-### 4. 说话人识别（可选，预览版）
-
-> ⚠️ **预览功能**：说话人识别功能目前处于预览阶段，后续版本中行为或接口可能有所调整。
-
-适用于访谈、座谈、辩论、播客等多人对话视频。启用后，字幕中每句话前会标注说话人姓名，例如 `[Host] 欢迎来到今天的节目`。
-
-**步骤一：安装额外依赖**
-```bash
-uv sync --extra speakers
-```
-
-**步骤二：设置 HuggingFace Token**
-```bash
-export HUGGINGFACE_TOKEN=hf_your_token_here
-```
-并在 HuggingFace 上接受 [pyannote 模型协议](https://huggingface.co/pyannote/speaker-diarization-community-1)。
-
-**步骤三：提取参考音频**
-
-从视频中截取每位说话人的参考片段（10–30 秒，单人清晰语音）：
-```bash
-uv run python tools/extract_reference.py VIDEO 起始时间 结束时间 "references/姓名.wav"
-
-# 示例
-uv run python tools/extract_reference.py interview.mp4 00:01:23 00:01:50 "references/Host.wav"
-uv run python tools/extract_reference.py interview.mp4 00:03:10 00:03:40 "references/Guest.wav"
-```
-
-**步骤四：运行**
-```bash
-uv run python video_orchestrator.py --speaker-references references/ "VIDEO_URL_OR_PATH"
-```
-
 #### 选项 A：使用 Streamlit 网页界面
 
 **启动 Streamlit 应用：**
@@ -145,6 +114,10 @@ uv run streamlit run streamlit_app.py
 5. 在结果区域预览生成的剪辑和封面
 
 **优势：** 无需记住命令行参数，提供可视化操作界面，适合所有用户。
+
+**并发处理：** Streamlit 界面支持同时处理多个视频任务：
+- 点击「处理视频」启动第一个任务 → 自动跟踪进度
+- **打开新标签页**启动第二个任务 → 在新标签页中独立跟踪
 
 #### 选项 B：使用 AI Agent 技能
 
@@ -173,6 +146,48 @@ uv run python video_orchestrator.py "/path/to/video.mp4"
 ```
 
 > 如需使用已有字幕，请将 `.srt` 文件放在同目录下，文件名保持一致（如 `video.mp4` → `video.srt`）。
+
+<a id="speaker-identification"></a>
+<details>
+<summary>🎙️ 说话人识别（可选，预览版）</summary>
+
+> ⚠️ **预览功能**：说话人识别功能目前处于预览阶段，后续版本中行为或接口可能有所调整。
+
+适用于访谈、座谈、辩论、播客等多人对话视频。启用后，字幕中每句话前会标注说话人姓名，例如 `[Host] 欢迎来到今天的节目`。这为 AI 的高光分析提供了更丰富的上下文——让它能更准确地识别特定说话人之间最精彩的交流片段，而非将所有语音一视同仁。
+
+**步骤一：安装额外依赖**
+
+```bash
+uv sync --extra speakers
+```
+
+**步骤二：设置 HuggingFace Token**
+
+```bash
+export HUGGINGFACE_TOKEN=hf_your_token_here
+```
+
+并在 HuggingFace 上接受 [pyannote 模型协议](https://huggingface.co/pyannote/speaker-diarization-community-1)。
+
+**步骤三：提取参考音频**
+
+从视频中截取每位说话人的参考片段（10–30 秒，单人清晰语音）：
+
+```bash
+uv run python tools/extract_reference.py VIDEO 起始时间 结束时间 "references/姓名.wav"
+
+# 示例
+uv run python tools/extract_reference.py interview.mp4 00:01:23 00:01:50 "references/Host.wav"
+uv run python tools/extract_reference.py interview.mp4 00:03:10 00:03:40 "references/Guest.wav"
+```
+
+**步骤四：运行**
+
+```bash
+uv run python video_orchestrator.py --speaker-references references/ "VIDEO_URL_OR_PATH"
+```
+
+</details>
 
 ## 📖 命令行参数
 

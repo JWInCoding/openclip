@@ -288,9 +288,9 @@ class VideoOrchestrator:
                     # Add _part01 suffix to subtitle filename
                     splits_sub_name = f"{sub_file.stem}_part01{sub_file.suffix}"
                     splits_sub = splits_dir / splits_sub_name
-                    if not splits_sub.exists():
-                        shutil.copy2(str(sub_file), str(splits_sub))
-                        logger.info(f"📁 Copied subtitle to splits dir as part01: {splits_sub.name}")
+                    # Always copy to ensure we use the latest version
+                    shutil.copy2(str(sub_file), str(splits_sub))
+                    logger.info(f"📁 Copied subtitle to splits dir as part01: {splits_sub.name}")
                     # Add subtitle to transcript_parts
                     if not hasattr(result, 'transcript_parts'):
                         result.transcript_parts = []

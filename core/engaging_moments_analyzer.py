@@ -535,6 +535,7 @@ Please fix the JSON and return ONLY the valid JSON, no explanations:
             # Check duration constraints (30 seconds to 4 minutes)
             if duration < 30 or duration > 240:
                 logger.warning(f"Invalid duration: {duration} seconds")
+                # logger.warning(f"Invalid moment: {moment}")  # for debugging
                 return False
             
             moment['duration_seconds'] = int(duration)

@@ -4,6 +4,7 @@ Whisper Transcript Generation
 Complete transcript processing including CLI usage and orchestration functionality
 """
 
+import re
 import subprocess
 import sys
 import os
@@ -200,8 +201,16 @@ class TranscriptProcessor:
         else:
             # Scenario 2: Use existing transcript
             if self.whisperx_processor and self.enable_diarization:
-                logger.info("⚡ Using WhisperX diarization on existing transcript")
-                return await self._add_speakers_to_existing(video_files, progress_callback)
+                if self._has_speaker_labels(subtitle_path):
+                    logger.info("📥 Source transcript already has speaker labels, skipping diarization")
+                    return {
+                        'source': 'existing_diarized',
+                        'transcript_path': subtitle_path if isinstance(video_files, str) else '',
+                        'transcript_parts': [] if isinstance(video_files, str) else self._get_existing_transcript_parts(video_files)
+                    }
+                else:
+                    logger.info("⚡ Using WhisperX diarization on existing transcript")
+                    return await self._add_speakers_to_existing(video_files, progress_callback)
             else:
                 logger.info("📥 Using existing subtitles")
                 return {
@@ -319,6 +328,17 @@ class TranscriptProcessor:
             'transcript_path': transcript_parts[0] if len(transcript_parts) == 1 else '',
             'transcript_parts': transcript_parts,
         }
+
+    def _has_speaker_labels(self, srt_path: str) -> bool:
+        """Return True if the SRT file already contains [SpeakerName] prefixes."""
+        try:
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if re.match(r'^\[.+\]', line.strip()):
+                        return True
+        except (OSError, IOError):
+            pass
+        return False
 
     def _get_existing_transcript_parts(self, video_files: List[str]) -> List[str]:
         """Get existing transcript parts (they should already exist from splitting)"""

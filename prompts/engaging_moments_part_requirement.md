@@ -99,6 +99,7 @@ In addition to the general criteria above, apply these type-specific nuances bas
 - Do not invent or hallucinate timestamps
 - Verify every timestamp exists in the transcript before including it
 - The transcript excerpt must match the actual text between start_time and end_time
+- **CRITICAL**: Copy timestamps EXACTLY as shown. `00:01:55` means 1min 55sec, NOT `01:55:00` (which is 1hr 55min)
 
 **How to determine `start_time`:**
 - Locate the first core statement about the engaging moment
