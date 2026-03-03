@@ -20,6 +20,7 @@ from core.downloaders import VideoDownloader, DownloadProcessor
 from core.video_splitter import VideoSplitter
 from core.transcript_generation_whisper import TranscriptProcessor
 from core.engaging_moments_analyzer import EngagingMomentsAnalyzer
+from core.insights_analyzer import InsightsAnalyzer
 from core.clip_generator import ClipGenerator
 from core.title_adder import TitleAdder, TITLE_FONT_SIZES
 from core.cover_image_generator import CoverImageGenerator, COVER_COLORS
@@ -122,21 +123,31 @@ class VideoOrchestrator:
         )
         self.download_processor = DownloadProcessor(self.downloader)
         
-        # Initialize engaging moments analyzer only if not skipping and API key is available
+        # Initialize the appropriate analyzer based on mode
         self.skip_analysis = skip_analysis
         self.engaging_moments_analyzer = None
+        self.insights_analyzer = None
         if not skip_analysis and api_key:
             try:
-                self.engaging_moments_analyzer = EngagingMomentsAnalyzer(
-                    api_key=api_key,
-                    provider=self.llm_provider,
-                    use_background=use_background,
-                    language=language,
-                    debug=self.debug,
-                    custom_prompt_file=custom_prompt_file,
-                    max_clips=max_clips,
-                    mode=mode,
-                )
+                if mode == "insights":
+                    self.insights_analyzer = InsightsAnalyzer(
+                        api_key=api_key,
+                        provider=self.llm_provider,
+                        use_background=use_background,
+                        language=language,
+                        debug=self.debug,
+                        max_clips=max_clips,
+                    )
+                else:
+                    self.engaging_moments_analyzer = EngagingMomentsAnalyzer(
+                        api_key=api_key,
+                        provider=self.llm_provider,
+                        use_background=use_background,
+                        language=language,
+                        debug=self.debug,
+                        custom_prompt_file=custom_prompt_file,
+                        max_clips=max_clips,
+                    )
                 logger.info(f"🧠 Engaging moments analysis: enabled (provider: {self.llm_provider}, language: {language}, mode: {mode}, background: {'yes' if use_background else 'no'})")
             except ValueError as e:
                 logger.warning(f"🔑 Engaging moments analysis disabled: {e}")
@@ -331,7 +342,8 @@ class VideoOrchestrator:
             
             # Step 4: Analyze engaging moments or insights (if not skipped and analyzer available)
             engaging_result = None
-            if self.engaging_moments_analyzer and not self.skip_analysis:
+            analyzer_ready = (self.engaging_moments_analyzer or self.insights_analyzer) and not self.skip_analysis
+            if analyzer_ready:
                 if self.mode == "insights":
                     logger.info("💡 Step 4: Extracting insights...")
                     engaging_result = await self._analyze_insights(result, progress_callback)
@@ -695,13 +707,13 @@ class VideoOrchestrator:
                 for i, transcript_path in enumerate(result.transcript_parts):
                     part_name = f"part{i+1:02d}"
 
-                    part_result = await self.engaging_moments_analyzer.analyze_part_for_insights(
+                    part_result = await self.insights_analyzer.analyze_part(
                         transcript_path, part_name
                     )
 
                     transcript_dir = Path(transcript_path).parent
                     insights_file = transcript_dir / f"insights_{part_name}.json"
-                    await self.engaging_moments_analyzer.save_highlights_to_file(part_result, str(insights_file))
+                    await self.insights_analyzer.save_highlights_to_file(part_result, str(insights_file))
                     insights_files.append(str(insights_file))
 
                     if progress_callback:
@@ -709,24 +721,32 @@ class VideoOrchestrator:
                         progress_callback(f"Analyzed part {i+1}/{len(result.transcript_parts)}", progress)
 
                 transcript_dir = Path(result.transcript_parts[0]).parent
-                all_insights = self.engaging_moments_analyzer.collect_all_insights(insights_files)
 
-                # Save all_insights.json (raw insights format for consumers like mindstream)
+                # Save all_insights.json — raw, unranked concatenation of all parts
+                all_insights = self.insights_analyzer.collect_all_insights(insights_files)
                 all_insights_file = transcript_dir / "all_insights.json"
-                await self.engaging_moments_analyzer.save_highlights_to_file(all_insights, str(all_insights_file))
+                await self.insights_analyzer.save_highlights_to_file(all_insights, str(all_insights_file))
+                logger.info(f"💡 {all_insights['total_insights']} insights extracted across all parts")
 
-                # Save top_engaging_moments.json (ClipGenerator-compatible format)
-                top_moments = insights_to_clip_format(all_insights.get("insights", []))
+                # Save top_insights.json — LLM-ranked, capped at max_clips
+                logger.info(f"🔄 Aggregating top {self.insights_analyzer.max_clips} insights...")
+                top_insights = await self.insights_analyzer.aggregate_top_insights(
+                    insights_files, str(transcript_dir)
+                )
+                top_insights_file = transcript_dir / "top_insights.json"
+                await self.insights_analyzer.save_highlights_to_file(top_insights, str(top_insights_file))
+                logger.info(f"✅ {top_insights['total_insights']} insights selected after aggregation")
+
+                # Save top_engaging_moments.json — ClipGenerator-compatible format
+                top_moments = insights_to_clip_format(top_insights.get("insights", []))
                 aggregated_file = transcript_dir / "top_engaging_moments.json"
-                await self.engaging_moments_analyzer.save_highlights_to_file(top_moments, str(aggregated_file))
-
-                logger.info(f"💡 {all_insights['total_insights']} insights extracted")
+                await self.insights_analyzer.save_highlights_to_file(top_moments, str(aggregated_file))
 
                 return {
                     'insights_files': insights_files,
                     'all_insights_file': str(all_insights_file),
                     'aggregated_file': str(aggregated_file),
-                    'insights': all_insights.get("insights", []),
+                    'insights': top_insights.get("insights", []),
                     'total_parts_analyzed': len(result.transcript_parts),
                 }
             else:

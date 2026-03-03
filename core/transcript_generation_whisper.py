@@ -330,11 +330,17 @@ class TranscriptProcessor:
         }
 
     def _has_speaker_labels(self, srt_path: str) -> bool:
-        """Return True if the SRT file already contains [SpeakerName] prefixes."""
+        """Return True if the SRT file already contains [SpeakerName] prefixes.
+
+        WhisperX writes speaker labels as '[SPEAKER_00] text' or '[Sam Altman] text' —
+        the bracket content always starts with an uppercase letter.
+        YouTube sound annotations like '[laughter]' or '[applause]' are lowercase
+        and must not be treated as speaker labels.
+        """
         try:
             with open(srt_path, 'r', encoding='utf-8') as f:
                 for line in f:
-                    if re.match(r'^\[.+\]', line.strip()):
+                    if re.match(r'^\[[A-Z]', line.strip()):
                         return True
         except (OSError, IOError):
             pass
