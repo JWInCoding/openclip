@@ -163,17 +163,66 @@ class VideoFileValidator:
     SUBTITLE_EXTENSIONS = ['.srt', '.vtt', '.ass']
     
     @classmethod
+    def resolve_local_path(cls, source: str) -> str:
+        """
+        Return the best-matching local path for source.
+
+        If the path exists as-is, returns it unchanged. If not, scans the
+        parent directory for a file whose name matches after normalizing
+        common Unicode punctuation variants (curly apostrophes, smart quotes,
+        en/em dashes, etc.) to their ASCII equivalents. This handles filenames
+        copied from web pages or macOS apps that substitute typographic
+        characters for standard ASCII ones.
+
+        Returns the resolved path string if a match is found, otherwise the
+        original source string (which will fail existence checks as before).
+        """
+        path = Path(source)
+        if path.exists():
+            return source
+
+        parent = path.parent
+        if not parent.exists():
+            return source
+
+        target = cls._ascii_normalize(path.name)
+        for candidate in parent.iterdir():
+            if cls._ascii_normalize(candidate.name) == target:
+                logger.info(
+                    f"Resolved Unicode filename variant: {path.name!r} → {candidate.name!r}"
+                )
+                return str(candidate)
+
+        return source
+
+    # Map of common Unicode punctuation to their ASCII equivalents
+    _UNICODE_PUNCT_MAP = str.maketrans({
+        '\u2018': "'", '\u2019': "'",   # left/right single quotation marks
+        '\u201a': "'", '\u201b': "'",   # single low-9 / high-reversed-9
+        '\u201c': '"', '\u201d': '"',   # left/right double quotation marks
+        '\u201e': '"', '\u201f': '"',   # double low-9 / high-reversed-9
+        '\u2013': '-', '\u2014': '-',   # en dash, em dash
+        '\u2026': '...',                # horizontal ellipsis
+        '\u00b7': '.',                  # middle dot
+    })
+
+    @classmethod
+    def _ascii_normalize(cls, name: str) -> str:
+        """Normalize Unicode punctuation variants to ASCII for fuzzy matching."""
+        return name.translate(cls._UNICODE_PUNCT_MAP)
+
+    @classmethod
     def is_local_video_file(cls, source: str) -> bool:
         """Check if source is a local video file or URL"""
         # Check if it's a URL
         if source.startswith(('http://', 'https://', 'ftp://')):
             return False
-        
+
         # Check if it's a valid file path
         path = Path(source)
         if not path.exists():
             return False
-        
+
         # Check if it's a video file by extension
         return path.suffix.lower() in cls.VIDEO_EXTENSIONS
     

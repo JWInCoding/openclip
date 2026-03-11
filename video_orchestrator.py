@@ -235,6 +235,11 @@ class VideoOrchestrator:
             if progress_callback:
                 progress_callback("Starting video processing...", 0)
             
+            # Resolve Unicode filename variants before any existence checks.
+            # e.g. a curly apostrophe (') typed as a straight one (') won't
+            # match on disk — resolve_local_path finds the real file if it exists.
+            source = VideoFileValidator.resolve_local_path(source)
+
             # Check if source is a local file or URL
             is_local_file = await self._is_local_video_file(source)
 
