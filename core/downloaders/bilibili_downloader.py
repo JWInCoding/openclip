@@ -174,6 +174,14 @@ class ImprovedBilibiliDownloader:
                 'Referer': 'https://www.bilibili.com/',
             }
     
+    def _get_browser_headers_for(self, browser: str) -> Dict[str, str]:
+        """Get headers for a specific browser (used when falling back to a different browser)"""
+        original = self.browser
+        self.browser = browser
+        headers = self._get_browser_headers()
+        self.browser = original
+        return headers
+
     def validate_url(self, url: str) -> bool:
         """Validate if URL is a valid Bilibili URL"""
         bilibili_patterns = [
@@ -297,6 +305,7 @@ class ImprovedBilibiliDownloader:
                     'quiet': True,
                     'no_warnings': True,
                     'cookiesfrombrowser': (browser, None, None, None),
+                    'http_headers': self._get_browser_headers_for(browser),
                 })
                 
                 loop = asyncio.get_event_loop()
