@@ -81,6 +81,7 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 - **LLM API Key** (choose one)
   - **Qwen API Key** - Get your key from [Alibaba Cloud](https://dashscope.aliyun.com/) (uses qwen3.5-flash model by default)
   - **OpenRouter API Key** - Get your key from [OpenRouter](https://openrouter.ai/) (uses stepfun/step-3.5-flash:free model by default)
+  - **GLM API Key** - Get your key from [ZhipuAI](https://open.bigmodel.cn/) (uses glm-4.7 model by default)
 
 - **Firefox Browser** (optional) - For more stable Bilibili video downloads
 - **HuggingFace Token** (optional, for speaker identification) - Get from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and accept the [pyannote model agreement](https://huggingface.co/pyannote/speaker-diarization-community-1)
@@ -117,6 +118,11 @@ export QWEN_API_KEY=your_api_key_here
 **Using OpenRouter:**
 ```bash
 export OPENROUTER_API_KEY=your_api_key_here
+```
+
+**Using GLM (ZhipuAI):**
+```bash
+export GLM_API_KEY=your_api_key_here
 ```
 
 ### 3. Run the Pipeline
@@ -279,7 +285,7 @@ Output goes to `clips_post_processed/`. The original language appears at the bot
 |----------|-------------|---------|
 | `VIDEO_URL_OR_PATH` | Video URL or local file path (positional) | Required |
 | `-o`, `--output` | Custom output directory | `processed_videos` |
-| `--llm-provider` | LLM provider (`qwen` or `openrouter`) | `qwen` |
+| `--llm-provider` | LLM provider (`qwen`, `openrouter`, or `glm`) | `qwen` |
 | `--language` | Output language (`zh` or `en`) | `zh` |
 | `--browser` | Browser for cookies (`chrome`/`firefox`/`edge`/`safari`) | `firefox` |
 | `--force-whisper` | Force Whisper transcription (ignore platform subtitles) | Off |
@@ -437,7 +443,7 @@ Output Ready!
 - Cookie/authentication issues. Try `--browser firefox` to switch browsers, or login to Bilibili in your browser first.
 
 ### No clips generated
-**Cause**: Missing API key or analysis failed. Check `echo $QWEN_API_KEY` or `echo $OPENROUTER_API_KEY`, and verify analysis files exist.
+**Cause**: Missing API key or analysis failed. Check `echo $QWEN_API_KEY`, `echo $OPENROUTER_API_KEY`, or `echo $GLM_API_KEY`, and verify analysis files exist.
 
 ### FFmpeg errors
 **Cause**: FFmpeg not installed or not in PATH. Run `ffmpeg -version` to check, install if missing (macOS: `brew install ffmpeg`).

@@ -11,6 +11,7 @@ from .transcript_generation_whisper import TranscriptProcessor
 from .engaging_moments_analyzer import EngagingMomentsAnalyzer
 from .llm.qwen_api_client import QwenAPIClient
 from .llm.openrouter_api_client import OpenRouterAPIClient
+from .llm.glm_api_client import GLMAPIClient
 from .clip_generator import ClipGenerator
 from .title_adder import TitleAdder
 from .cover_image_generator import CoverImageGenerator
@@ -34,6 +35,7 @@ __all__ = [
     'EngagingMomentsAnalyzer',
     'QwenAPIClient',
     'OpenRouterAPIClient',
+    'GLMAPIClient',
     'ClipGenerator',
     'TitleAdder',
     'CoverImageGenerator',

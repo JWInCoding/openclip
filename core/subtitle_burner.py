@@ -67,6 +67,9 @@ class SubtitleBurner:
             if provider == "openrouter":
                 from core.llm.openrouter_api_client import OpenRouterAPIClient
                 self.client = OpenRouterAPIClient(api_key=api_key)
+            elif provider == "glm":
+                from core.llm.glm_api_client import GLMAPIClient
+                self.client = GLMAPIClient(api_key=api_key)
             else:
                 from core.llm.qwen_api_client import QwenAPIClient
                 self.client = QwenAPIClient(api_key=api_key)

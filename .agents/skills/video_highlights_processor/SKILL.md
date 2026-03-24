@@ -1,55 +1,19 @@
 ---
-name: "video-clip-extractor"
-description: "Processes videos to identify engaging moments, generate transcripts, and create highlight clips with artistic titles and custom cover images. Use when user needs to: extract highlights from long videos or livestreams, clip or cut best moments from videos, cut video highlights, process Bilibili/YouTube URLs or local video files, generate transcripts via Whisper, analyze content for engaging moments, create short-form clips with styled titles and covers, adjust cover text position and colors, find and export memorable scenes from recordings, burn subtitles into clips (with optional translation), guide clip selection with user intent, or identify speakers in multi-person conversations."
-allowed-tools: Bash(uv run python video_orchestrator.py*), Bash(git clone*), Bash(git -C*openclip*), Bash(cd ~/.local/share/openclip*), AskUserQuestion
+name: "video_highlights_processor"
+description: "Processes videos to identify engaging moments, generate transcripts, and create highlight clips with artistic titles and custom cover images. Use when user needs to: extract highlights from long videos or livestreams, clip or cut best moments from videos, process Bilibili/YouTube URLs or local video files, generate transcripts via Whisper, analyze content for engaging moments, create short-form clips with styled titles and covers, adjust cover text position and colors, find and export memorable scenes from recordings, burn subtitles into clips (with optional translation), guide clip selection with user intent, or identify speakers in multi-person conversations."
 ---
 
-# Video Clip Extractor Skill
+# Video Highlights Processor Skill
 
 Run the video orchestrator to process videos and extract engaging highlights.
 
-## When Triggered
-
-1. **Get the source** — if the user didn't provide a video URL or file path, ask for it.
-2. **Clarify intent** (optional) — if the user wants clips focused on a specific topic, capture it for `--user-intent`. If unclear, ask: "Any specific topic or moments to focus on? (e.g. 'funny moments', 'key arguments')"
-3. **Check environment** — does `video_orchestrator.py` exist in the current directory? If yes, run directly. Otherwise use the global install at `~/.local/share/openclip`.
-4. **Verify prerequisites** — check ffmpeg is installed and at least one API key is set. Warn if missing before running.
-5. **Run the command** and stream output to user.
-6. **Report results** — after completion, list the generated clips with timestamps and titles.
-
-## Setup (first use only)
-
-Before running, determine the execution context:
-
-1. **Inside openclip repo** — if `video_orchestrator.py` exists in the current directory, skip setup and run directly.
-2. **Global install** — if `~/.local/share/openclip` does not exist, run these steps:
-
-**Prerequisites:** `git` and `uv` must be installed.
-- Install uv if missing: macOS: `brew install uv` · Linux/Windows: `pip install uv`
-
-```bash
-git clone https://github.com/linzzzzzz/openclip.git ~/.local/share/openclip
-cd ~/.local/share/openclip && uv sync
-```
-
-To update openclip later:
-```bash
-git -C ~/.local/share/openclip pull && cd ~/.local/share/openclip && uv sync
-```
-
 ## Execution
 
-**If inside the openclip repo** (current directory contains `video_orchestrator.py`):
+Run from the project root using `uv` (the project uses `uv` with `pyproject.toml` and `uv.lock`):
+
 ```bash
 uv run python video_orchestrator.py [options] <source>
 ```
-
-**If running globally** (from any other directory):
-```bash
-cd ~/.local/share/openclip && uv run python video_orchestrator.py -o "$OLDPWD/processed_videos" [options] <source>
-```
-
-`$OLDPWD` captures the user's original directory so clips are saved there, not inside the openclip install.
 
 Where `<source>` is a video URL (Bilibili/YouTube) or local file path (MP4, WebM, AVI, MOV, MKV).
 
@@ -57,17 +21,13 @@ For local files with existing subtitles, place the `.srt` file in the same direc
 
 ## Preflight Checklist
 
-- **Inside openclip repo**: run from the repo root so relative paths (e.g. `references/`, `prompts/`) resolve correctly
-- **`ffmpeg` must be installed** (required for all clip generation):
-  - macOS: `brew install ffmpeg`
-  - Ubuntu: `sudo apt install ffmpeg`
-  - Windows: download from [ffmpeg.org](https://ffmpeg.org)
-  - If using `--burn-subtitles`: needs ffmpeg with `libass` (see README for details)
+- Run from repository root so relative paths (for example `references/`) resolve correctly
 - Set one API key:
   - `QWEN_API_KEY` (default provider: qwen), or
   - `OPENROUTER_API_KEY` (if `--llm-provider openrouter`), or
   - `GLM_API_KEY` (if `--llm-provider glm`)
 - If using `--speaker-references`: run `uv sync --extra speakers` and set `HUGGINGFACE_TOKEN`
+- If using `--burn-subtitles`: ensure `ffmpeg` is installed with `libass`
 
 ## CLI Reference
 
@@ -130,31 +90,15 @@ Set the appropriate API key for the chosen `--llm-provider`:
 
 The orchestrator runs this pipeline automatically:
 
-1. **Download** — fetch video + platform subtitles (Bilibili/YouTube) or accept local file
-2. **Split** — divide videos longer than the built-in threshold into segments for parallel analysis
-3. **Transcribe** — use platform subtitles or Whisper AI; `--force-whisper` overrides
-4. **Analyze** — LLM scores transcript segments for engagement; `--user-intent` steers selection
-5. **Generate clips** — ffmpeg cuts the video at identified timestamps
-6. **Add titles** (opt-in) — render artistic text overlay using `--title-style`
-7. **Generate covers** — create thumbnail image for each clip
+1. **Download** video and platform subtitles (Bilibili/YouTube) or accept local file
+2. **Split** videos longer than the built-in duration threshold into segments
+3. **Transcribe** using platform subtitles or Whisper AI (fallback or `--force-whisper`)
+4. **Analyze** transcript for engaging moments via LLM
+5. **Generate clips** from identified moments
+6. **Add artistic titles** to clips using `--title-style`
+7. **Generate cover images** for each highlight
 
 Use `--skip-clips`, `--skip-cover` to skip specific steps. Use `--add-titles` to enable artistic titles. Use `--skip-download` and `--skip-analysis` to resume from intermediate results.
-
-## Output Example
-
-After a successful run, report results like this:
-
-```
-✅ Processing complete — 5 clips generated
-📁 processed_videos/video_name/clips/
-
-  clip_01.mp4  [00:12:34 – 00:15:20]  "Title of the moment"
-  clip_02.mp4  [00:28:45 – 00:31:10]  "Another highlight"
-  clip_03.mp4  [00:45:00 – 00:47:30]  "Key discussion point"
-  ...
-
-Cover images: clips/*.jpg
-```
 
 ## Output Structure
 
@@ -187,8 +131,7 @@ processed_videos/{video_name}/
 
 | Error | Fix |
 |---|---|
-| "ffmpeg not found" / clip generation fails silently | Install ffmpeg: `brew install ffmpeg` (macOS) or `sudo apt install ffmpeg` (Ubuntu) |
-| "No API key provided" | Set `QWEN_API_KEY`, `OPENROUTER_API_KEY`, or `GLM_API_KEY` env var |
+| "No API key provided" | Set `QWEN_API_KEY` or `OPENROUTER_API_KEY` env var |
 | "Video download failed" | Check network/URL; try different `--browser`; or use local file |
 | "Transcript generation failed" | Try `--force-whisper` or check audio quality |
 | "No engaging moments found" | Try `--force-whisper` for better transcript accuracy |

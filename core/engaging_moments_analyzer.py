@@ -50,8 +50,11 @@ class EngagingMomentsAnalyzer:
         elif self.provider == "openrouter":
             from core.llm.openrouter_api_client import OpenRouterAPIClient
             self.llm_client = OpenRouterAPIClient(api_key)
+        elif self.provider == "glm":
+            from core.llm.glm_api_client import GLMAPIClient
+            self.llm_client = GLMAPIClient(api_key)
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen' and 'openrouter'.")
+            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', and 'glm'.")
         
         # Load background information if enabled
         if self.use_background:

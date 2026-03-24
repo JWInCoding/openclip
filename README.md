@@ -81,6 +81,7 @@
 - **LLM API Key**（选择其一）
   - **Qwen API Key** - 从[阿里云](https://dashscope.aliyun.com/)获取密钥（默认使用 qwen3.5-flash 模型）
   - **OpenRouter API Key** - 从[OpenRouter](https://openrouter.ai/)获取密钥（默认使用 stepfun/step-3.5-flash:free 模型）
+  - **GLM API Key** - 从[智谱AI](https://open.bigmodel.cn/)获取密钥（默认使用 glm-4.7 模型）
 
 - **Firefox 浏览器** (可选) - 使用浏览器 Cookie 让Bilibili 视频下载更稳定
 - **HuggingFace Token** (可选，用于说话人识别) - 从 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 获取，并接受 [pyannote 模型协议](https://huggingface.co/pyannote/speaker-diarization-community-1)
@@ -117,6 +118,11 @@ export QWEN_API_KEY=your_api_key_here
 **使用 OpenRouter：**
 ```bash
 export OPENROUTER_API_KEY=your_api_key_here
+```
+
+**使用 GLM（智谱AI）：**
+```bash
+export GLM_API_KEY=your_api_key_here
 ```
 
 ### 3. 运行流水线
@@ -279,7 +285,7 @@ uv run python video_orchestrator.py \
 |------|------|--------|
 | `VIDEO_URL_OR_PATH` | 视频 URL 或本地文件路径（位置参数） | 必填 |
 | `-o`, `--output` | 自定义输出目录 | `processed_videos` |
-| `--llm-provider` | LLM 提供商（`qwen` 或 `openrouter`） | `qwen` |
+| `--llm-provider` | LLM 提供商（`qwen`、`openrouter` 或 `glm`） | `qwen` |
 | `--language` | 输出语言（`zh` 或 `en`） | `zh` |
 | `--browser` | 用于 cookie 的浏览器（`chrome`/`firefox`/`edge`/`safari`） | `firefox` |
 | `--force-whisper` | 强制使用 Whisper 转录（忽略平台字幕） | 关 |
@@ -437,7 +443,7 @@ AI 分析（每个片段）
 - Cookie/身份验证问题。尝试 `--browser firefox` 切换浏览器，或先在浏览器中登录 Bilibili。
 
 ### 未生成剪辑
-**原因**：缺少 API 密钥或分析失败。检查 `echo $QWEN_API_KEY` 或 `echo $OPENROUTER_API_KEY`，并确认分析文件存在。
+**原因**：缺少 API 密钥或分析失败。检查 `echo $QWEN_API_KEY`、`echo $OPENROUTER_API_KEY` 或 `echo $GLM_API_KEY`，并确认分析文件存在。
 
 ### FFmpeg 错误
 **原因**：FFmpeg 未安装或不在 PATH 中。运行 `ffmpeg -version` 检查，缺失则安装（macOS: `brew install ffmpeg`）。

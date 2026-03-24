@@ -31,6 +31,16 @@ LLM_CONFIG: Dict[str, Dict[str, Any]] = {
             "top_p": 0.8,
             "stream": False
         }
+    },
+    "glm": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "default_model": "glm-4.7",
+        "default_params": {
+            "max_tokens": 32768,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "stream": False
+        }
     }
 }
 
@@ -38,7 +48,8 @@ LLM_CONFIG: Dict[str, Dict[str, Any]] = {
 # Environment variable names for API keys
 API_KEY_ENV_VARS: Dict[str, str] = {
     "qwen": "QWEN_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY"
+    "openrouter": "OPENROUTER_API_KEY",
+    "glm": "GLM_API_KEY"
 }
 
 

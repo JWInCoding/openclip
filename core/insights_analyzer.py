@@ -42,9 +42,12 @@ class InsightsAnalyzer:
         elif self.provider == "openrouter":
             from core.llm.openrouter_api_client import OpenRouterAPIClient
             self.llm_client = OpenRouterAPIClient(api_key)
+        elif self.provider == "glm":
+            from core.llm.glm_api_client import GLMAPIClient
+            self.llm_client = GLMAPIClient(api_key)
         else:
             raise ValueError(
-                f"Unsupported provider: {provider}. Supported: 'qwen', 'openrouter'."
+                f"Unsupported provider: {provider}. Supported: 'qwen', 'openrouter', 'glm'."
             )
 
         if self.use_background:
