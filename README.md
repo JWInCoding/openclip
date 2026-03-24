@@ -17,6 +17,8 @@
 
 ## 📢 最新动态
 
+- **2026-03-24**:
+  - 新增 [GLM（智谱AI）](https://bigmodel.cn) 和 [MiniMax](https://minimaxi.com) 作为 LLM 提供商，现支持 Qwen、OpenRouter、GLM、MiniMax 四个提供商
 - **2026-03-11**:
   - OpenClip 现已上架 skills.sh，可通过 `npx skills add https://github.com/linzzzzzz/openclip --skill video-clip-extractor` 在任意目录安装为 Agent Skill，并让 Agent 调用
 - **2026-03-08**:
@@ -82,6 +84,7 @@
   - **Qwen API Key** - 从[阿里云](https://dashscope.aliyun.com/)获取密钥（默认使用 qwen3.5-flash 模型）
   - **OpenRouter API Key** - 从[OpenRouter](https://openrouter.ai/)获取密钥（默认使用 stepfun/step-3.5-flash:free 模型）
   - **GLM API Key** - 从[智谱AI](https://open.bigmodel.cn/)获取密钥（默认使用 glm-4.7 模型）
+  - **MiniMax API Key** - 从[MiniMax](https://platform.minimaxi.com/)获取密钥（默认使用 MiniMax-M2.7 模型）
 
 - **Firefox 浏览器** (可选) - 使用浏览器 Cookie 让Bilibili 视频下载更稳定
 - **HuggingFace Token** (可选，用于说话人识别) - 从 [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 获取，并接受 [pyannote 模型协议](https://huggingface.co/pyannote/speaker-diarization-community-1)
@@ -110,19 +113,13 @@ uv sync
 
 ### 2. 设置 API 密钥（用于 AI 功能）
 
-**使用 Qwen：**
-```bash
-export QWEN_API_KEY=your_api_key_here
-```
+根据你选择的 LLM 提供商，设置对应的环境变量（至少设置一个）：
 
-**使用 OpenRouter：**
 ```bash
-export OPENROUTER_API_KEY=your_api_key_here
-```
-
-**使用 GLM（智谱AI）：**
-```bash
-export GLM_API_KEY=your_api_key_here
+export QWEN_API_KEY=your_api_key_here        # 通义千问
+export OPENROUTER_API_KEY=your_api_key_here   # OpenRouter
+export GLM_API_KEY=your_api_key_here          # 智谱AI GLM (bigmodel.cn 国内端点)
+export MINIMAX_API_KEY=your_api_key_here      # MiniMax (minimaxi.com 国内端点)
 ```
 
 ### 3. 运行流水线
@@ -285,7 +282,7 @@ uv run python video_orchestrator.py \
 |------|------|--------|
 | `VIDEO_URL_OR_PATH` | 视频 URL 或本地文件路径（位置参数） | 必填 |
 | `-o`, `--output` | 自定义输出目录 | `processed_videos` |
-| `--llm-provider` | LLM 提供商（`qwen`、`openrouter` 或 `glm`） | `qwen` |
+| `--llm-provider` | LLM 提供商（`qwen`、`openrouter`、`glm` 或 `minimax`） | `qwen` |
 | `--language` | 输出语言（`zh` 或 `en`） | `zh` |
 | `--browser` | 用于 cookie 的浏览器（`chrome`/`firefox`/`edge`/`safari`） | `firefox` |
 | `--force-whisper` | 强制使用 Whisper 转录（忽略平台字幕） | 关 |
@@ -443,7 +440,7 @@ AI 分析（每个片段）
 - Cookie/身份验证问题。尝试 `--browser firefox` 切换浏览器，或先在浏览器中登录 Bilibili。
 
 ### 未生成剪辑
-**原因**：缺少 API 密钥或分析失败。检查 `echo $QWEN_API_KEY`、`echo $OPENROUTER_API_KEY` 或 `echo $GLM_API_KEY`，并确认分析文件存在。
+**原因**：缺少 API 密钥或分析失败。检查 `echo $QWEN_API_KEY`、`echo $OPENROUTER_API_KEY`、`echo $GLM_API_KEY` 或 `echo $MINIMAX_API_KEY`，并确认分析文件存在。
 
 ### FFmpeg 错误
 **原因**：FFmpeg 未安装或不在 PATH 中。运行 `ffmpeg -version` 检查，缺失则安装（macOS: `brew install ffmpeg`）。

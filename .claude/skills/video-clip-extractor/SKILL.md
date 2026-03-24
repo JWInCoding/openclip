@@ -66,7 +66,8 @@ For local files with existing subtitles, place the `.srt` file in the same direc
 - Set one API key:
   - `QWEN_API_KEY` (default provider: qwen), or
   - `OPENROUTER_API_KEY` (if `--llm-provider openrouter`), or
-  - `GLM_API_KEY` (if `--llm-provider glm`)
+  - `GLM_API_KEY` (if `--llm-provider glm`), or
+  - `MINIMAX_API_KEY` (if `--llm-provider minimax`)
 - If using `--speaker-references`: run `uv sync --extra speakers` and set `HUGGINGFACE_TOKEN`
 
 ## CLI Reference
@@ -90,7 +91,7 @@ For local files with existing subtitles, place the `.srt` file in the same direc
 | `--cover-fill-color <color>` | `yellow` | Cover text fill color: `yellow`, `red`, `white`, `cyan`, `green`, `orange`, `pink`, `purple`, `gold`, `silver` |
 | `--cover-outline-color <color>` | `black` | Cover text outline color: `yellow`, `red`, `white`, `cyan`, `green`, `orange`, `pink`, `purple`, `gold`, `silver`, `black` |
 | `--language <lang>` | `zh` | Output language: `zh` (Chinese), `en` (English) |
-| `--llm-provider <provider>` | `qwen` | LLM provider: `qwen`, `openrouter`, `glm` |
+| `--llm-provider <provider>` | `qwen` | LLM provider: `qwen`, `openrouter`, `glm`, `minimax` |
 | `--user-intent <text>` | — | Free-text focus description (e.g. "moments about AI risks"). Steers LLM clip selection toward this topic |
 | `--subtitle-translation <lang>` | — | Translate subtitles to this language before burning (e.g. `"Simplified Chinese"`). Requires `--burn-subtitles` and `QWEN_API_KEY` |
 | `--speaker-references <dir>` | — | Directory of reference WAV files (one per speaker, filename = speaker name) for speaker diarization. Requires `uv sync --extra speakers` and `HUGGINGFACE_TOKEN` |
@@ -125,6 +126,7 @@ Set the appropriate API key for the chosen `--llm-provider`:
 - `QWEN_API_KEY` — for `--llm-provider qwen`
 - `OPENROUTER_API_KEY` — for `--llm-provider openrouter`
 - `GLM_API_KEY` — for `--llm-provider glm`
+- `MINIMAX_API_KEY` — for `--llm-provider minimax`
 
 ## Workflow
 
@@ -188,7 +190,7 @@ processed_videos/{video_name}/
 | Error | Fix |
 |---|---|
 | "ffmpeg not found" / clip generation fails silently | Install ffmpeg: `brew install ffmpeg` (macOS) or `sudo apt install ffmpeg` (Ubuntu) |
-| "No API key provided" | Set `QWEN_API_KEY`, `OPENROUTER_API_KEY`, or `GLM_API_KEY` env var |
+| "No API key provided" | Set `QWEN_API_KEY`, `OPENROUTER_API_KEY`, `GLM_API_KEY`, or `MINIMAX_API_KEY` env var |
 | "Video download failed" | Check network/URL; try different `--browser`; or use local file |
 | "Transcript generation failed" | Try `--force-whisper` or check audio quality |
 | "No engaging moments found" | Try `--force-whisper` for better transcript accuracy |

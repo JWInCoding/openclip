@@ -12,6 +12,7 @@ from .engaging_moments_analyzer import EngagingMomentsAnalyzer
 from .llm.qwen_api_client import QwenAPIClient
 from .llm.openrouter_api_client import OpenRouterAPIClient
 from .llm.glm_api_client import GLMAPIClient
+from .llm.minimax_api_client import MiniMaxAPIClient
 from .clip_generator import ClipGenerator
 from .title_adder import TitleAdder
 from .cover_image_generator import CoverImageGenerator
@@ -36,6 +37,7 @@ __all__ = [
     'QwenAPIClient',
     'OpenRouterAPIClient',
     'GLMAPIClient',
+    'MiniMaxAPIClient',
     'ClipGenerator',
     'TitleAdder',
     'CoverImageGenerator',

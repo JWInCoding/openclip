@@ -45,9 +45,12 @@ class InsightsAnalyzer:
         elif self.provider == "glm":
             from core.llm.glm_api_client import GLMAPIClient
             self.llm_client = GLMAPIClient(api_key)
+        elif self.provider == "minimax":
+            from core.llm.minimax_api_client import MiniMaxAPIClient
+            self.llm_client = MiniMaxAPIClient(api_key)
         else:
             raise ValueError(
-                f"Unsupported provider: {provider}. Supported: 'qwen', 'openrouter', 'glm'."
+                f"Unsupported provider: {provider}. Supported: 'qwen', 'openrouter', 'glm', 'minimax'."
             )
 
         if self.use_background:

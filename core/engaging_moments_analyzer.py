@@ -53,8 +53,11 @@ class EngagingMomentsAnalyzer:
         elif self.provider == "glm":
             from core.llm.glm_api_client import GLMAPIClient
             self.llm_client = GLMAPIClient(api_key)
+        elif self.provider == "minimax":
+            from core.llm.minimax_api_client import MiniMaxAPIClient
+            self.llm_client = MiniMaxAPIClient(api_key)
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', and 'glm'.")
+            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', 'glm', and 'minimax'.")
         
         # Load background information if enabled
         if self.use_background:

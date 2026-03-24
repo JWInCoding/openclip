@@ -17,6 +17,8 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 
 ## 📢 News
 
+- **2026-03-24**:
+  - Added [GLM (ZhipuAI)](https://bigmodel.cn) and [MiniMax](https://minimaxi.com) as LLM providers — now supports Qwen, OpenRouter, GLM, and MiniMax
 - **2026-03-11**:
   - OpenClip is now on skills.sh — install it as an Agent Skill via `npx skills add https://github.com/linzzzzzz/openclip --skill video-clip-extractor` and let your agent invoke it from any directory
 - **2026-03-08**:
@@ -82,6 +84,7 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
   - **Qwen API Key** - Get your key from [Alibaba Cloud](https://dashscope.aliyun.com/) (uses qwen3.5-flash model by default)
   - **OpenRouter API Key** - Get your key from [OpenRouter](https://openrouter.ai/) (uses stepfun/step-3.5-flash:free model by default)
   - **GLM API Key** - Get your key from [ZhipuAI](https://open.bigmodel.cn/) (uses glm-4.7 model by default)
+  - **MiniMax API Key** - Get your key from [MiniMax](https://platform.minimaxi.com/) (uses MiniMax-M2.7 model by default)
 
 - **Firefox Browser** (optional) - For more stable Bilibili video downloads
 - **HuggingFace Token** (optional, for speaker identification) - Get from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and accept the [pyannote model agreement](https://huggingface.co/pyannote/speaker-diarization-community-1)
@@ -110,19 +113,13 @@ uv sync
 
 ### 2. Set API Key (for AI features)
 
-**Using Qwen:**
-```bash
-export QWEN_API_KEY=your_api_key_here
-```
+Set the environment variable for your chosen LLM provider (at least one):
 
-**Using OpenRouter:**
 ```bash
-export OPENROUTER_API_KEY=your_api_key_here
-```
-
-**Using GLM (ZhipuAI):**
-```bash
-export GLM_API_KEY=your_api_key_here
+export QWEN_API_KEY=your_api_key_here        # Qwen (Alibaba)
+export OPENROUTER_API_KEY=your_api_key_here   # OpenRouter
+export GLM_API_KEY=your_api_key_here          # GLM / ZhipuAI (bigmodel.cn, China endpoint)
+export MINIMAX_API_KEY=your_api_key_here      # MiniMax (minimaxi.com, China endpoint)
 ```
 
 ### 3. Run the Pipeline
@@ -285,7 +282,7 @@ Output goes to `clips_post_processed/`. The original language appears at the bot
 |----------|-------------|---------|
 | `VIDEO_URL_OR_PATH` | Video URL or local file path (positional) | Required |
 | `-o`, `--output` | Custom output directory | `processed_videos` |
-| `--llm-provider` | LLM provider (`qwen`, `openrouter`, or `glm`) | `qwen` |
+| `--llm-provider` | LLM provider (`qwen`, `openrouter`, `glm`, or `minimax`) | `qwen` |
 | `--language` | Output language (`zh` or `en`) | `zh` |
 | `--browser` | Browser for cookies (`chrome`/`firefox`/`edge`/`safari`) | `firefox` |
 | `--force-whisper` | Force Whisper transcription (ignore platform subtitles) | Off |
@@ -443,7 +440,7 @@ Output Ready!
 - Cookie/authentication issues. Try `--browser firefox` to switch browsers, or login to Bilibili in your browser first.
 
 ### No clips generated
-**Cause**: Missing API key or analysis failed. Check `echo $QWEN_API_KEY`, `echo $OPENROUTER_API_KEY`, or `echo $GLM_API_KEY`, and verify analysis files exist.
+**Cause**: Missing API key or analysis failed. Check `echo $QWEN_API_KEY`, `echo $OPENROUTER_API_KEY`, `echo $GLM_API_KEY`, or `echo $MINIMAX_API_KEY`, and verify analysis files exist.
 
 ### FFmpeg errors
 **Cause**: FFmpeg not installed or not in PATH. Run `ffmpeg -version` to check, install if missing (macOS: `brew install ffmpeg`).

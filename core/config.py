@@ -41,6 +41,16 @@ LLM_CONFIG: Dict[str, Dict[str, Any]] = {
             "top_p": 0.8,
             "stream": False
         }
+    },
+    "minimax": {
+        "base_url": "https://api.minimaxi.com/v1/chat/completions",
+        "default_model": "MiniMax-M2.7",
+        "default_params": {
+            "max_tokens": 32768,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "stream": False
+        }
     }
 }
 
@@ -49,7 +59,8 @@ LLM_CONFIG: Dict[str, Dict[str, Any]] = {
 API_KEY_ENV_VARS: Dict[str, str] = {
     "qwen": "QWEN_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
-    "glm": "GLM_API_KEY"
+    "glm": "GLM_API_KEY",
+    "minimax": "MINIMAX_API_KEY"
 }
 
 

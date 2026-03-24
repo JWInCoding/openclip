@@ -70,6 +70,9 @@ class SubtitleBurner:
             elif provider == "glm":
                 from core.llm.glm_api_client import GLMAPIClient
                 self.client = GLMAPIClient(api_key=api_key)
+            elif provider == "minimax":
+                from core.llm.minimax_api_client import MiniMaxAPIClient
+                self.client = MiniMaxAPIClient(api_key=api_key)
             else:
                 from core.llm.qwen_api_client import QwenAPIClient
                 self.client = QwenAPIClient(api_key=api_key)
