@@ -22,30 +22,48 @@ class VideoDownloader:
     Unified video downloader that automatically detects platform and uses appropriate downloader
     """
     
-    def __init__(self, output_dir: str = "downloads", quality: str = "best", browser: str = "firefox"):
+    def __init__(
+        self,
+        output_dir: str = "downloads",
+        quality: str = "best",
+        browser: str = "firefox",
+        cookies: Optional[str] = None,
+        js_runtime: Optional[str] = "auto",
+        js_runtime_path: Optional[str] = None,
+    ):
         """
         Initialize the unified video downloader
         
         Args:
             output_dir: Base directory to save downloaded videos
             quality: Video quality preference (best, worst, or specific format)
-            browser: Browser for cookie extraction (only used for Bilibili)
+            browser: Browser for cookie extraction when no cookie file is provided
+            cookies: Optional path to a Netscape-format cookies.txt file
+            js_runtime: JavaScript runtime strategy for YouTube ('auto', 'deno', 'node', 'none')
+            js_runtime_path: Optional explicit path to the JS runtime executable
         """
         self.output_dir = output_dir
         self.quality = quality
         self.browser = browser
+        self.cookies = cookies
+        self.js_runtime = js_runtime
+        self.js_runtime_path = js_runtime_path
         
         # Initialize platform-specific downloaders
         self.bilibili_downloader = ImprovedBilibiliDownloader(
             output_dir=output_dir,
             quality=quality,
-            browser=browser
+            browser=browser,
+            cookies=cookies,
         )
         
         self.youtube_downloader = YouTubeDownloader(
             output_dir=output_dir,
-            # quality=quality,
-            # browser=browser  # Pass browser to YouTube downloader too
+            quality=quality,
+            browser=browser,
+            cookies=cookies,
+            js_runtime=js_runtime,
+            js_runtime_path=js_runtime_path,
         )
     
     def detect_platform(self, url: str) -> str:

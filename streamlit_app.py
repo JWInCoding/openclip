@@ -48,6 +48,7 @@ TRANSLATIONS = {
         'title_style': 'Title Style',
         'language': 'Output Language',
         'output_dir': 'Output Directory',
+        'cookies_file': 'Cookies File Path (optional)',
         'use_background': 'Use Background Info',
         'user_intent': 'What are you looking for? (optional)',
         'user_intent_help': 'Describe what you want to find, e.g. "Sam\'s predictions about AI timelines" or "funny moments". Leave blank to find the most engaging clips overall.',
@@ -104,6 +105,7 @@ TRANSLATIONS = {
         'select_title_style': 'Select the visual style for titles and covers',
         'select_language': 'Language for analysis and output',
         'enter_output_dir': 'Directory to save processed videos',
+        'cookies_file_help': 'Optional path to a Netscape-format cookies.txt file. When provided, it overrides browser cookie extraction.',
         'force_whisper_help': 'Force transcript generation via Whisper (ignore platform subtitles)',
         'generate_clips_help': 'Generate video clips for engaging moments',
         'max_clips_help': 'Maximum number of highlight clips to generate',
@@ -134,6 +136,7 @@ TRANSLATIONS = {
         'title_style': '标题风格',
         'language': '输出语言',
         'output_dir': '输出目录',
+        'cookies_file': 'Cookies 文件路径（可选）',
         'use_background': '使用背景信息提示词',
         'user_intent': '你想找什么？（可选）',
         'user_intent_help': '描述你想找的内容，例如"Sam对AI时间线的预测"或"搞笑时刻"。留空则自动找最精彩的片段。',
@@ -190,6 +193,7 @@ TRANSLATIONS = {
         'select_title_style': '选择标题和封面的视觉风格',
         'select_language': '分析和输出的语言',
         'enter_output_dir': '保存处理后视频的目录',
+        'cookies_file_help': '可选的 Netscape 格式 cookies.txt 文件路径。提供后会优先使用该文件，而不是从浏览器提取 cookie。',
         'force_whisper_help': '强制通过 Whisper 生成字幕（忽略平台字幕）',
         'generate_clips_help': '为精彩时刻生成视频片段',
         'max_clips_help': '生成高光片段的最大数量',
@@ -231,6 +235,7 @@ DEFAULT_DATA = {
     'title_style': DEFAULT_TITLE_STYLE,
     'language': "zh",
     'output_dir': "processed_videos",
+    'cookies_file': "",
     'custom_prompt_file': None,
     'custom_prompt_text': "",
     'speaker_references_dir': "",
@@ -275,7 +280,6 @@ def save_to_file(data):
         except:
             pass
         raise e
-
 # Load persistent data
 data = load_from_file()
 
@@ -619,6 +623,8 @@ with st.sidebar:
     )
     data['output_dir'] = output_dir
 
+    cookies_file = ""
+
     # Checkboxes for additional options
     generate_cover = st.checkbox(
         t['generate_cover'],
@@ -677,6 +683,17 @@ with st.sidebar:
         st.info(t['background_info_notice'])
     
     with st.expander(t['advanced_options']):
+        cookies_file = st.text_input(
+            t['cookies_file'],
+            value=data.get('cookies_file', ''),
+            help=t['cookies_file_help'],
+            placeholder="cookies.txt",
+            key=f"cookies_file_{st.session_state.reset_counter}"
+        )
+        data['cookies_file'] = cookies_file
+        if cookies_file and not Path(cookies_file).is_file():
+            st.caption("⚠️ Cookies file not found. Download will fail until this path is corrected.")
+
         force_whisper = st.checkbox(
             t['force_whisper'],
             value=data['force_whisper'],
@@ -980,7 +997,8 @@ def process_video_worker(job, progress_callback):
         output_dir=options['output_dir'],
         max_duration_minutes=options['max_duration_minutes'],
         whisper_model=options['whisper_model'],
-        browser="firefox",
+        browser=options.get('browser', 'firefox'),
+        cookies=options.get('cookies_file') or None,
         api_key=options['api_key'],
         llm_provider=options['llm_provider'],
         skip_analysis=False,
@@ -1007,6 +1025,9 @@ def process_video_worker(job, progress_callback):
         skip_download=False,
         progress_callback=progress_callback,
     ))
+
+    if not result.success:
+        raise RuntimeError(getattr(result, 'error_message', None) or "Processing failed")
     
     # Convert result to dict for JSON serialization
     return {
@@ -1037,6 +1058,7 @@ if process_clicked:
             'output_dir': output_dir,
             'max_duration_minutes': MAX_DURATION_MINUTES,
             'whisper_model': WHISPER_MODEL,
+            'browser': 'firefox',
             'api_key': resolved_api_key,
             'llm_provider': llm_provider,
             'generate_clips': generate_clips,
@@ -1048,6 +1070,7 @@ if process_clicked:
             'custom_prompt_file': custom_prompt_file,
             'max_clips': max_clips,
             'force_whisper': force_whisper,
+            'cookies_file': cookies_file or None,
             'speaker_references_dir': speaker_references_dir or None,
             'burn_subtitles': burn_subtitles,
             'subtitle_translation': subtitle_translation or None,

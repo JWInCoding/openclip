@@ -52,6 +52,9 @@ class VideoOrchestrator:
                 max_duration_minutes: float = MAX_DURATION_MINUTES,
                 whisper_model: str = WHISPER_MODEL,
                 browser: str = "firefox",
+                cookies: Optional[str] = None,
+                js_runtime: Optional[str] = "auto",
+                js_runtime_path: Optional[str] = None,
                 api_key: Optional[str] = None,
                 llm_provider: str = DEFAULT_LLM_PROVIDER,
                 skip_analysis: bool = False,
@@ -82,6 +85,9 @@ class VideoOrchestrator:
             max_duration_minutes: Maximum duration before splitting (default 20 minutes)
             whisper_model: Whisper model to use for transcript generation
             browser: Browser for cookie extraction
+            cookies: Optional path to a Netscape-format cookies.txt file
+            js_runtime: JavaScript runtime strategy for YouTube ('auto', 'deno', 'node', 'none')
+            js_runtime_path: Optional explicit path to the JS runtime executable
             api_key: API key for the selected LLM provider
             llm_provider: LLM provider to use ("qwen" or "openrouter", default: from config.py)
             skip_analysis: Skip engaging moments analysis (clips can still use existing analysis file)
@@ -117,7 +123,10 @@ class VideoOrchestrator:
         # Note: Downloader and splitter will be configured per-video later
         self.downloader = VideoDownloader(
             output_dir=str(self.output_dir),
-            browser=browser
+            browser=browser,
+            cookies=cookies,
+            js_runtime=js_runtime,
+            js_runtime_path=js_runtime_path,
         )
         self.video_splitter = VideoSplitter(max_duration_minutes, self.output_dir)
         self.transcript_processor = TranscriptProcessor(
@@ -1127,6 +1136,13 @@ Note: Set QWEN_API_KEY or OPENROUTER_API_KEY environment variable based on your 
     parser.add_argument('--browser', default='firefox',
                        choices=['chrome', 'firefox', 'edge', 'safari'],
                        help='Browser for cookie extraction (default: firefox)')
+    parser.add_argument('--cookies', metavar='FILE',
+                       help='Path to a Netscape-format cookies.txt file. Overrides --browser when provided.')
+    parser.add_argument('--js-runtime', default='auto',
+                       choices=['auto', 'deno', 'node', 'none'],
+                       help='JavaScript runtime strategy for YouTube downloads only (default: auto)')
+    parser.add_argument('--js-runtime-path', metavar='FILE',
+                       help='Explicit path to the JavaScript runtime executable for YouTube only (advanced)')
     parser.add_argument('--language', default='zh',
                        choices=['zh', 'en'],
                        help='Language for output (zh: Chinese, en: English, default: zh)')
@@ -1178,12 +1194,21 @@ Note: Set QWEN_API_KEY or OPENROUTER_API_KEY environment variable based on your 
     # Get API key from environment
     api_key = os.getenv(API_KEY_ENV_VARS.get(args.llm_provider, "QWEN_API_KEY"))
 
+    if args.cookies and not Path(args.cookies).is_file():
+        parser.error(f"Cookies file not found: {args.cookies}")
+
+    if args.js_runtime_path and not Path(args.js_runtime_path).is_file():
+        parser.error(f"JS runtime executable not found: {args.js_runtime_path}")
+
     # Initialize orchestrator
     orchestrator = VideoOrchestrator(
         output_dir=args.output,
         max_duration_minutes=MAX_DURATION_MINUTES,
         whisper_model=WHISPER_MODEL,
         browser=args.browser,
+        cookies=args.cookies,
+        js_runtime=args.js_runtime,
+        js_runtime_path=args.js_runtime_path,
         api_key=api_key,
         llm_provider=args.llm_provider,
         skip_analysis=args.skip_analysis,

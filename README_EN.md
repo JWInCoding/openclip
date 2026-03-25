@@ -285,6 +285,9 @@ Output goes to `clips_post_processed/`. The original language appears at the bot
 | `--llm-provider` | LLM provider (`qwen`, `openrouter`, `glm`, or `minimax`) | `qwen` |
 | `--language` | Output language (`zh` or `en`) | `zh` |
 | `--browser` | Browser for cookies (`chrome`/`firefox`/`edge`/`safari`) | `firefox` |
+| `--cookies` | Path to a Netscape-format `cookies.txt` file; takes precedence over `--browser` | None |
+| `--js-runtime` | JavaScript runtime strategy for YouTube downloads only (`auto`/`deno`/`node`/`none`) | `auto` |
+| `--js-runtime-path` | Path to the JavaScript runtime executable for YouTube only (advanced) | None |
 | `--force-whisper` | Force Whisper transcription (ignore platform subtitles) | Off |
 | `--use-background` | Use background info for analysis | Off |
 | `--user-intent` | Natural language description of what you're looking for (e.g. `"moments about AI risks"`); steers LLM clip selection and ranking | None |
@@ -437,7 +440,8 @@ Output Ready!
 ### Download fails
 **Cause**: 
 - yt-dlp version is too old. Try updating dependencies: `uv sync`.
-- Cookie/authentication issues. Try `--browser firefox` to switch browsers, or login to Bilibili in your browser first.
+- Cookie/authentication issues. Try `--browser firefox`, or pass an exported cookies file via `--cookies /path/to/cookies.txt`.
+- If YouTube only exposes image/storyboard formats or reports `Requested format is not available`, OpenClip will now auto-try `deno`/`node` as a JS runtime. If needed, install one and pass `--js-runtime node --js-runtime-path /path/to/node` explicitly.
 
 ### No clips generated
 **Cause**: Missing API key or analysis failed. Check `echo $QWEN_API_KEY`, `echo $OPENROUTER_API_KEY`, `echo $GLM_API_KEY`, or `echo $MINIMAX_API_KEY`, and verify analysis files exist.

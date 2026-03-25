@@ -8,8 +8,10 @@ import os
 import asyncio
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Callable, Any
+import importlib.util
 
 import yt_dlp
 from yt_dlp.utils import DownloadError
@@ -53,19 +55,33 @@ class YouTubeDownloader:
     YouTube video downloader with subtitle support
     """
     
-    def __init__(self, output_dir: str = "downloads", quality: str = "best", browser: Optional[str] = None):
+    def __init__(
+        self,
+        output_dir: str = "downloads",
+        quality: str = "best",
+        browser: Optional[str] = None,
+        cookies: Optional[str] = None,
+        js_runtime: Optional[str] = "auto",
+        js_runtime_path: Optional[str] = None,
+    ):
         """
         Initialize the YouTube downloader
-        
+
         Args:
             output_dir: Base directory to save downloaded videos (each video gets its own subdirectory)
             quality: Video quality preference (best, worst, or specific format)
             browser: Optional browser to extract cookies from (chrome, firefox, edge, safari)
+            cookies: Optional path to a Netscape-format cookies.txt file
+            js_runtime: JavaScript runtime strategy for YouTube ('auto', 'deno', 'node', 'none')
+            js_runtime_path: Optional explicit path to the JS runtime executable
         """
         self.base_output_dir = Path(output_dir)
         self.base_output_dir.mkdir(exist_ok=True)
         self.quality = quality
         self.browser = browser.lower() if browser else None
+        self.cookies = cookies
+        self.js_runtime = (js_runtime or "auto").lower()
+        self.js_runtime_path = js_runtime_path
         
         # Base yt-dlp options for video download (no subtitle flags — subtitles are
         # fetched in a separate pass so a subtitle 429 never aborts the video download)
@@ -93,10 +109,72 @@ class YouTubeDownloader:
             'no_warnings': False,
         }
         
-        # Add browser cookies if specified (helps with restricted content)
-        if self.browser:
-            self.base_opts['cookiesfrombrowser'] = (self.browser, None, None, None)
+        # Add cookie authentication (helps with restricted content)
+        cookie_opts = {}
+        if self.cookies:
+            cookie_opts['cookiefile'] = self.cookies
+            logger.info(f"🍪 Using cookies file: {self.cookies}")
+        elif self.browser:
+            cookie_opts['cookiesfrombrowser'] = (self.browser, None, None, None)
             logger.info(f"🍪 Using cookies from {self.browser} browser")
+
+        if cookie_opts:
+            self.base_opts.update(cookie_opts)
+            self.subtitle_opts.update(cookie_opts)
+
+        js_runtime_opts = self._get_js_runtime_opts()
+        if js_runtime_opts:
+            self.base_opts.update(js_runtime_opts)
+            self.subtitle_opts.update(js_runtime_opts)
+
+    def _has_yt_dlp_ejs(self) -> bool:
+        """Check whether the yt-dlp-ejs component is available in the current env."""
+        return importlib.util.find_spec('yt_dlp_ejs') is not None
+
+    def _resolve_js_runtime(self) -> Optional[Dict[str, str]]:
+        """Resolve the JavaScript runtime configuration for yt-dlp."""
+        if self.js_runtime == 'none':
+            logger.info("🧩 YouTube JS runtime disabled explicitly")
+            return None
+
+        runtime_candidates = ['deno', 'node'] if self.js_runtime == 'auto' else [self.js_runtime]
+
+        for runtime in runtime_candidates:
+            runtime_path = self.js_runtime_path if self.js_runtime == runtime and self.js_runtime_path else shutil.which(runtime)
+            if runtime_path:
+                return {'runtime': runtime, 'path': runtime_path}
+
+        if self.js_runtime != 'auto':
+            logger.warning(f"⚠️ Requested JS runtime '{self.js_runtime}' was not found. Falling back to yt-dlp defaults.")
+        else:
+            logger.info("🧩 No supported JS runtime auto-detected for YouTube (checked: deno, node)")
+        return None
+
+    def _get_js_runtime_opts(self) -> Dict[str, Any]:
+        """Build yt-dlp JavaScript runtime options for better YouTube compatibility."""
+        runtime_config = self._resolve_js_runtime()
+        if not runtime_config:
+            if self.cookies:
+                logger.warning("⚠️ YouTube downloads with account cookies usually require both a JS runtime and yt-dlp-ejs. No JS runtime was found in this environment.")
+            else:
+                logger.warning("⚠️ YouTube downloads may expose limited formats without a JS runtime. Install Deno or Node for better reliability.")
+            return {}
+
+        runtime_name = runtime_config['runtime']
+        runtime_path = runtime_config['path']
+        logger.info(f"🧩 Using YouTube JS runtime: {runtime_name} ({runtime_path})")
+
+        if not self._has_yt_dlp_ejs():
+            if self.cookies:
+                logger.warning("⚠️ YouTube downloads with account cookies usually require both a JS runtime and yt-dlp-ejs. A JS runtime was found, but yt-dlp-ejs is missing in this environment.")
+            else:
+                logger.warning("⚠️ yt-dlp-ejs is not installed in this environment. A JS runtime alone may not fully restore YouTube format availability.")
+
+        return {
+            'js_runtimes': {
+                runtime_name: {'path': runtime_path},
+            },
+        }
     
     def _get_format_selector(self) -> str:
         """Get format selector based on quality preference"""
@@ -243,8 +321,6 @@ class YouTubeDownloader:
         # --- Pass 2: download subtitles (failure is non-fatal → Whisper fallback) ---
         sub_opts = self.subtitle_opts.copy()
         sub_opts['outtmpl'] = outtmpl
-        if self.browser:
-            sub_opts['cookiesfrombrowser'] = self.base_opts.get('cookiesfrombrowser')
 
         try:
             await loop.run_in_executor(None, self._download_sync, url, sub_opts)

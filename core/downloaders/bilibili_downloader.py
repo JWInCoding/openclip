@@ -57,7 +57,7 @@ class ImprovedBilibiliDownloader:
     Improved Bilibili video downloader with automatic cookie handling and advanced subtitle strategies
     """
     
-    def __init__(self, output_dir: str = "downloads", quality: str = "best", browser: str = "chrome"):
+    def __init__(self, output_dir: str = "downloads", quality: str = "best", browser: Optional[str] = "chrome", cookies: Optional[str] = None):
         """
         Initialize the improved Bilibili downloader
         
@@ -65,11 +65,13 @@ class ImprovedBilibiliDownloader:
             output_dir: Base directory to save downloaded videos (each video gets its own subdirectory)
             quality: Video quality preference (best, worst, or specific format)
             browser: Browser to extract cookies from (chrome, firefox, edge, safari)
+            cookies: Optional path to a Netscape-format cookies.txt file
         """
         self.base_output_dir = Path(output_dir)
         self.base_output_dir.mkdir(exist_ok=True)
         self.quality = quality
-        self.browser = browser.lower()
+        self.browser = browser.lower() if browser else None
+        self.cookies = cookies
         
         # Base yt-dlp options with improved anti-detection
         # Note: outtmpl will be set per video in create_video_directory
@@ -85,8 +87,6 @@ class ImprovedBilibiliDownloader:
             'ignoreerrors': False,
             'no_warnings': False,
             'noplaylist': True,
-            # Automatic cookie extraction from browser
-            'cookiesfrombrowser': (self.browser, None, None, None),
             # Enhanced headers to better mimic real browser requests
             'http_headers': self._get_browser_headers(),
             # Enhanced retry configuration with delays
@@ -97,6 +97,25 @@ class ImprovedBilibiliDownloader:
                 'fragment': lambda n: min(2 ** n, 30),
             },
         }
+
+        cookie_opts = self._get_cookie_opts()
+        if cookie_opts:
+            self.base_opts.update(cookie_opts)
+            if self.cookies:
+                logger.info(f"🍪 Using cookies file: {self.cookies}")
+            elif self.browser:
+                logger.info(f"🍪 Using cookies from {self.browser} browser")
+
+    def _get_cookie_opts(self, browser_override: Optional[str] = None) -> Dict[str, Any]:
+        """Return yt-dlp cookie options, preferring explicit cookie files."""
+        if self.cookies:
+            return {'cookiefile': self.cookies}
+
+        browser = (browser_override or self.browser)
+        if browser:
+            return {'cookiesfrombrowser': (browser, None, None, None)}
+
+        return {}
     
     def _get_format_selector(self) -> str:
         """Get format selector based on quality preference"""
@@ -288,14 +307,17 @@ class ImprovedBilibiliDownloader:
             'no_warnings': True,
         })
         # Remove cookies
-        if 'cookiesfrombrowser' in info_opts:
-            del info_opts['cookiesfrombrowser']
+        info_opts.pop('cookiesfrombrowser', None)
+        info_opts.pop('cookiefile', None)
         
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._extract_info_sync, url, info_opts)
     
     async def _get_info_with_different_browser(self, url: str) -> Dict[str, Any]:
         """Get video info with different browser cookies"""
+        if self.cookies:
+            raise Exception("Explicit cookie file already configured")
+
         browsers = ['firefox', 'edge', 'safari'] if self.browser == 'chrome' else ['chrome']
         
         for browser in browsers:
@@ -304,7 +326,7 @@ class ImprovedBilibiliDownloader:
                 info_opts.update({
                     'quiet': True,
                     'no_warnings': True,
-                    'cookiesfrombrowser': (browser, None, None, None),
+                    **self._get_cookie_opts(browser),
                     'http_headers': self._get_browser_headers_for(browser),
                 })
                 
@@ -413,7 +435,8 @@ class ImprovedBilibiliDownloader:
         try:
             fallback_opts = self.base_opts.copy()
             # Remove cookies for fallback
-            del fallback_opts['cookiesfrombrowser']
+            fallback_opts.pop('cookiesfrombrowser', None)
+            fallback_opts.pop('cookiefile', None)
             
             if custom_filename:
                 fallback_opts['outtmpl'] = str(video_dir / custom_filename)
@@ -485,9 +508,9 @@ class ImprovedBilibiliDownloader:
                 'subtitleslangs': ['ai-zh', 'zh-Hans', 'zh'],
                 'subtitlesformat': 'srt',
                 'outtmpl': str(video_dir / f'{safe_title}_sub.%(ext)s'),
-                'cookiesfrombrowser': (self.browser, None, None, None),
                 'quiet': True,
             }
+            subtitle_opts.update(self._get_cookie_opts())
             
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self._download_sync, url, subtitle_opts)
@@ -516,9 +539,9 @@ class ImprovedBilibiliDownloader:
                     'subtitleslangs': langs,
                     'subtitlesformat': 'srt',
                     'outtmpl': str(video_dir / f'{safe_title}_lang.%(ext)s'),
-                    'cookiesfrombrowser': (self.browser, None, None, None),
                     'quiet': True,
                 }
+                subtitle_opts.update(self._get_cookie_opts())
                 
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, self._download_sync, url, subtitle_opts)

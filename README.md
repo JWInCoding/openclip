@@ -285,6 +285,9 @@ uv run python video_orchestrator.py \
 | `--llm-provider` | LLM 提供商（`qwen`、`openrouter`、`glm` 或 `minimax`） | `qwen` |
 | `--language` | 输出语言（`zh` 或 `en`） | `zh` |
 | `--browser` | 用于 cookie 的浏览器（`chrome`/`firefox`/`edge`/`safari`） | `firefox` |
+| `--cookies` | Netscape 格式 `cookies.txt` 文件路径；提供后优先于 `--browser` | 无 |
+| `--js-runtime` | 仅用于 YouTube 下载的 JavaScript 运行时策略（`auto`/`deno`/`node`/`none`） | `auto` |
+| `--js-runtime-path` | 仅用于 YouTube 下载的 JavaScript 运行时可执行文件路径（高级选项） | 无 |
 | `--force-whisper` | 强制使用 Whisper 转录（忽略平台字幕） | 关 |
 | `--use-background` | 使用背景信息辅助分析 | 关 |
 | `--user-intent` | 用自然语言描述关注重点（如 `"关于 AI 风险的观点"`），引导 AI 优先选取相关片段 | 无 |
@@ -437,7 +440,8 @@ AI 分析（每个片段）
 ### 下载失败
 **原因**：
 - yt-dlp版本过旧。尝试更新依赖版本：`uv sync`。
-- Cookie/身份验证问题。尝试 `--browser firefox` 切换浏览器，或先在浏览器中登录 Bilibili。
+- Cookie/身份验证问题。可尝试 `--browser firefox` 切换浏览器，或通过 `--cookies /path/to/cookies.txt` 提供导出的 cookies 文件。
+- YouTube 只显示图片格式或报 `Requested format is not available`。OpenClip 会自动尝试 `deno` / `node` 作为 JS 运行时；如果仍失败，请安装其中之一，或用 `--js-runtime node --js-runtime-path /path/to/node` 显式指定。
 
 ### 未生成剪辑
 **原因**：缺少 API 密钥或分析失败。检查 `echo $QWEN_API_KEY`、`echo $OPENROUTER_API_KEY`、`echo $GLM_API_KEY` 或 `echo $MINIMAX_API_KEY`，并确认分析文件存在。
