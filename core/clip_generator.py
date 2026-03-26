@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from core.file_string_utils import FileStringUtils
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,7 +76,7 @@ class ClipGenerator:
                     continue
                 
                 # Create output filename
-                safe_title = self._sanitize_filename(title)
+                safe_title = FileStringUtils.sanitize_filename(title)
                 output_filename = f"rank_{rank:02d}_{safe_title}.mp4"
                 output_path = self.output_dir / output_filename
                 
@@ -287,17 +289,6 @@ class ClipGenerator:
         except Exception as e:
             logger.warning(f"⚠ Error extracting subtitle for clip: {e}")
             return False
-    
-    def _sanitize_filename(self, title: str) -> str:
-        """Clean title for use as filename"""
-        # Remove emojis and special characters
-        title = re.sub(r'[^\w\s-]', '', title)
-        # Replace spaces with underscores
-        title = re.sub(r'[\s\-]+', '_', title)
-        # Remove multiple underscores
-        title = re.sub(r'_+', '_', title)
-        # Trim underscores
-        return title.strip('_')
     
     def _time_to_seconds(self, time_str: str) -> int:
         """Convert MM:SS or HH:MM:SS to seconds"""

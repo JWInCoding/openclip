@@ -14,6 +14,8 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 import logging
 
+from core.file_string_utils import FileStringUtils
+
 logger = logging.getLogger(__name__)
 
 
@@ -358,9 +360,7 @@ class VideoFileManager:
             video_name = video_file.stem
         
         # Sanitize video name for directory
-        safe_video_name = re.sub(r'[^\w\s-]', '', video_name)
-        safe_video_name = re.sub(r'[\s\-]+', '_', safe_video_name)
-        safe_video_name = re.sub(r'_+', '_', safe_video_name).strip('_')
+        safe_video_name = FileStringUtils.sanitize_filename(video_name)
         
         # Create video-specific directory structure
         video_root_dir = output_dir / safe_video_name
@@ -395,9 +395,7 @@ class VideoFileManager:
                     video_name = video_file.stem
                 
                 # Sanitize video name for directory
-                safe_video_name = re.sub(r'[^\w\s-]', '', video_name)
-                safe_video_name = re.sub(r'[\s\-]+', '_', safe_video_name)
-                safe_video_name = re.sub(r'_+', '_', safe_video_name).strip('_')
+                safe_video_name = FileStringUtils.sanitize_filename(video_name)
                 
                 # Copy subtitle to output directory
                 subtitle_dest = output_dir / safe_video_name / "local_videos" / f"{video_file.stem}{ext}"

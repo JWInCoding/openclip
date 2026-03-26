@@ -14,6 +14,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
 import os
 
+from core.file_string_utils import FileStringUtils
+
 logger = logging.getLogger(__name__)
 
 
@@ -506,7 +508,7 @@ class TitleAdder:
                     progress_callback(f"Adding titles - clip {i+1}/{total_moments}: {title[:30]}...", progress)
                 
                 # Find input clip
-                safe_title = self._sanitize_filename(title)
+                safe_title = FileStringUtils.sanitize_filename(title)
                 input_filename = f"rank_{rank:02d}_{safe_title}.mp4"
                 input_path = clips_dir / input_filename
                 
@@ -569,13 +571,6 @@ class TitleAdder:
                 'successful_clips': 0,
                 'processed_clips': []
             }
-    
-    def _sanitize_filename(self, title: str) -> str:
-        """Clean title for filename"""
-        title = re.sub(r'[^\w\s-]', '', title)
-        title = re.sub(r'[\s\-]+', '_', title)
-        title = re.sub(r'_+', '_', title)
-        return title.strip('_')
     
     def _add_artistic_title(self, input_video: str, title: str,
                            output_video: str, title_style: str, font_size: int = 40,

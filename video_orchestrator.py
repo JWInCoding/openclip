@@ -17,6 +17,7 @@ import shutil
 
 # Import our components from core package
 from core.downloaders import VideoDownloader, DownloadProcessor
+from core.file_string_utils import FileStringUtils
 from core.video_splitter import VideoSplitter
 from core.transcript_generation_whisper import TranscriptProcessor
 from core.engaging_moments_analyzer import EngagingMomentsAnalyzer
@@ -293,9 +294,7 @@ class VideoOrchestrator:
 
             # Compute video_root_dir from video info for use throughout the pipeline
             video_name = result.video_info.get('title', 'video')
-            safe_video_name = re.sub(r'[^\w\s-]', '', video_name)
-            safe_video_name = re.sub(r'[\s\-]+', '_', safe_video_name)
-            safe_video_name = re.sub(r'_+', '_', safe_video_name).strip('_')
+            safe_video_name = FileStringUtils.sanitize_filename(video_name)
             video_root_dir = self.output_dir / safe_video_name
             video_root_dir.mkdir(parents=True, exist_ok=True)
             
@@ -578,9 +577,7 @@ class VideoOrchestrator:
         
         # Create video-specific directory structure
         video_name = video_info.get('title', 'video')
-        safe_video_name = re.sub(r'[^\w\s-]', '', video_name)
-        safe_video_name = re.sub(r'[\s\-]+', '_', safe_video_name)
-        safe_video_name = re.sub(r'_+', '_', safe_video_name).strip('_')
+        safe_video_name = FileStringUtils.sanitize_filename(video_name)
         
         video_root_dir = self.output_dir / safe_video_name
         video_root_dir.mkdir(parents=True, exist_ok=True)
@@ -896,9 +893,7 @@ class VideoOrchestrator:
 
             # Derive directory paths from phase1_result
             video_name = result.video_info.get('title', 'video')
-            safe_video_name = re.sub(r'[^\w\s-]', '', video_name)
-            safe_video_name = re.sub(r'[\s\-]+', '_', safe_video_name)
-            safe_video_name = re.sub(r'_+', '_', safe_video_name).strip('_')
+            safe_video_name = FileStringUtils.sanitize_filename(video_name)
             video_root_dir = self.output_dir / safe_video_name
 
             video_clips_dir = video_root_dir / "clips"
@@ -993,9 +988,7 @@ class VideoOrchestrator:
                 moment_title = moment['title']
                 
                 # Find the corresponding clip file
-                safe_moment_title = re.sub(r'[^\w\s-]', '', moment_title)
-                safe_moment_title = re.sub(r'[\s\-]+', '_', safe_moment_title)
-                safe_moment_title = re.sub(r'_+', '_', safe_moment_title).strip('_')
+                safe_moment_title = FileStringUtils.sanitize_filename(moment_title)
                 
                 # Look for the clip in the video-specific clips directory
                 clip_filename = f"rank_{rank:02d}_{safe_moment_title}.mp4"
