@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from core.file_string_utils import FileStringUtils
 # Import the video orchestrator
 from video_orchestrator import VideoOrchestrator
 from core.config import API_KEY_ENV_VARS, DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, LLM_CONFIG
@@ -1180,7 +1181,7 @@ if process_clicked:
                     part_url = part['url']
                     part_options = job_options.copy()
                     # Append part info to output dir to keep them separate
-                    part_options['output_dir'] = os.path.join(output_dir, f"P{part['index']}_{part['title'][:30]}")
+                    part_options['output_dir'] = os.path.join(output_dir, f"P{part['index']}_{FileStringUtils.sanitize_filename(part['title'])[:30]}")
                     
                     job_id = job_manager.create_job(part_url, part_options)
                     job_manager.start_job(job_id, process_video_worker)
