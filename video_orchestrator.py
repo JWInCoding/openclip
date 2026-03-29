@@ -78,7 +78,7 @@ class VideoOrchestrator:
                 burn_subtitles: bool = False,
                 subtitle_translation: str = None,
                 user_intent: Optional[str] = None,
-                snap_to_sentence_boundary: bool = False):
+                normalize_boundaries: bool = False):
         """
         Initialize the video orchestrator
 
@@ -180,7 +180,7 @@ class VideoOrchestrator:
         if self.generate_clips_enabled:
             self.clip_generator = ClipGenerator(
                 output_dir=str(self.output_dir),
-                snap_to_sentence_boundary=snap_to_sentence_boundary,
+                normalize_boundaries=normalize_boundaries,
             )
             logger.info(f"🎬 Clip generation: enabled")
         else:
@@ -1179,9 +1179,9 @@ Note: Set QWEN_API_KEY or OPENROUTER_API_KEY environment variable based on your 
                        help='Free-text description of what you are looking for '
                             '(e.g. "moments about AI risks"). Steers LLM clip selection '
                             'and ranking toward this focus.')
-    parser.add_argument('--snap-boundaries', action='store_true',
-                       help='Snap clip end times to the nearest sentence boundary in the SRT '
-                            'to avoid cutting in the middle of speech (experimental)')
+    parser.add_argument('--normalize-boundaries', action='store_true',
+                       help='Normalize both clip start and end times to nearby subtitle boundaries '
+                            '(experimental)')
     args = parser.parse_args()
 
     if args.verbose:
@@ -1232,7 +1232,7 @@ Note: Set QWEN_API_KEY or OPENROUTER_API_KEY environment variable based on your 
         burn_subtitles=args.burn_subtitles,
         subtitle_translation=args.subtitle_translation,
         user_intent=args.user_intent,
-        snap_to_sentence_boundary=args.snap_boundaries,
+        normalize_boundaries=args.normalize_boundaries,
     )
     
     def progress_callback(status: str, progress: float):
