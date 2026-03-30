@@ -132,13 +132,16 @@
   <tr><td>OpenClaw (YC)</td><td>Cross-dissolves</td><td>Catches jump cuts, misses dissolve transitions</td></tr>
 </table>
 
-<h3>Pitch variance vs spectral contrast</h3>
-<p><strong>Pitch variance</strong> shows meaningful variation across all test videos &mdash; you can clearly see animated vs calm segments. It's the most informative new signal for highlight identification in this content type.</p>
+<h3>Pitch variance and energy</h3>
+<p><strong>Pitch variance</strong> and <strong>energy</strong> both show meaningful variation across these videos, so they appear directionally promising as signals.</p>
+<p>That said, they likely need further processing before they become genuinely useful for highlight identification on their own.</p>
+
+<h3>Spectral contrast</h3>
 <p><strong>Spectral contrast</strong> is nearly flat across all four videos because they're all studio recordings with consistent audio quality. It would become useful for videos with mixed audio environments (live events, outdoor shoots, audience Q&amp;A segments).</p>
 
 <h3>Silence-based clip boundary snapping</h3>
-<p>We currently use silence intervals to snap clip end-times to natural pauses, avoiding abrupt mid-sentence cutoffs. However, the silence detection is currently done through <strong>subtitle/SRT timestamps</strong> (sentence boundary punctuation + SRT segment end times), not through the audio signal directly.</p>
-<p>Librosa's silence detection (visible as blue regions on the timeline) operates on the actual audio waveform and may be more accurate &mdash; it captures real acoustic pauses rather than relying on transcription timing, which can drift from the audio. Worth evaluating whether librosa-based silence snapping produces cleaner cuts than the current SRT-based approach, especially for videos with imprecise or auto-generated subtitles.</p>
+<p>Silence is already proving useful for clip boundary quality. In the latest commit, we decided to leverage <strong>transcript-detected silence</strong> to normalize clip start and end boundaries, which helps avoid abrupt mid-sentence cutoffs.</p>
+<p>Librosa-based silence detection (visible as blue regions on the timeline) still looks promising, but we should further evaluate whether it is worth incorporating beyond the current transcript-based approach.</p>
 
 </div>
 </details>
