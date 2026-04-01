@@ -22,6 +22,8 @@ def test_llm_config_uses_environment_overrides(monkeypatch):
         env.setenv("OPENROUTER_BASE_URL", "https://router.example/api/v1/")
         env.setenv("GLM_BASE_URL", "https://glm.example/api/paas/v4")
         env.setenv("MINIMAX_MODEL", "MiniMax-Test")
+        env.setenv("CUSTOM_OPENAI_BASE_URL", "https://openai.example/v1/")
+        env.setenv("CUSTOM_OPENAI_MODEL", "custom-model")
 
         reloaded = reload_config()
 
@@ -30,6 +32,8 @@ def test_llm_config_uses_environment_overrides(monkeypatch):
         assert reloaded.LLM_CONFIG["openrouter"]["base_url"] == "https://router.example/api/v1/chat/completions"
         assert reloaded.LLM_CONFIG["glm"]["base_url"] == "https://glm.example/api/paas/v4/chat/completions"
         assert reloaded.LLM_CONFIG["minimax"]["default_model"] == "MiniMax-Test"
+        assert reloaded.LLM_CONFIG["custom_openai"]["base_url"] == "https://openai.example/v1/chat/completions"
+        assert reloaded.LLM_CONFIG["custom_openai"]["default_model"] == "custom-model"
 
     reload_config()
 

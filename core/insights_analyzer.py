@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import re
 
-from core.config import MAX_CLIPS
+from core.config import LLM_CONFIG, MAX_CLIPS
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,8 @@ class InsightsAnalyzer:
         language: str = "en",
         debug: bool = False,
         max_clips: int = MAX_CLIPS,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
     ):
         self.max_clips = max_clips
         self.provider = provider.lower()
@@ -35,22 +37,34 @@ class InsightsAnalyzer:
         self.background_content = None
         self.language = language
         self.debug = debug
+        self.model = model.strip() if model else None
+        self.base_url = base_url.strip() if base_url else None
+
+        if self.provider == "custom_openai" and not (
+            self.model or LLM_CONFIG["custom_openai"]["default_model"]
+        ):
+            raise ValueError(
+                "custom_openai requires llm_model. Set CUSTOM_OPENAI_MODEL or provide llm_model."
+            )
 
         if self.provider == "qwen":
             from core.llm.qwen_api_client import QwenAPIClient
-            self.llm_client = QwenAPIClient(api_key)
+            self.llm_client = QwenAPIClient(api_key, base_url=self.base_url)
         elif self.provider == "openrouter":
             from core.llm.openrouter_api_client import OpenRouterAPIClient
-            self.llm_client = OpenRouterAPIClient(api_key)
+            self.llm_client = OpenRouterAPIClient(api_key, base_url=self.base_url)
         elif self.provider == "glm":
             from core.llm.glm_api_client import GLMAPIClient
-            self.llm_client = GLMAPIClient(api_key)
+            self.llm_client = GLMAPIClient(api_key, base_url=self.base_url)
         elif self.provider == "minimax":
             from core.llm.minimax_api_client import MiniMaxAPIClient
-            self.llm_client = MiniMaxAPIClient(api_key)
+            self.llm_client = MiniMaxAPIClient(api_key, base_url=self.base_url)
+        elif self.provider == "custom_openai":
+            from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
+            self.llm_client = CustomOpenAIAPIClient(api_key, base_url=self.base_url)
         else:
             raise ValueError(
-                f"Unsupported provider: {provider}. Supported: 'qwen', 'openrouter', 'glm', 'minimax'."
+                f"Unsupported provider: {provider}. Supported: 'qwen', 'openrouter', 'glm', 'minimax', 'custom_openai'."
             )
 
         if self.use_background:
@@ -214,7 +228,7 @@ class InsightsAnalyzer:
         self._export_debug_prompt(prompt, "insights_analysis", part_name)
 
         try:
-            response = self.llm_client.simple_chat(prompt)
+            response = self.llm_client.simple_chat(prompt, model=self.model)
             return self._parse_part_response(response, part_name, entries)
         except Exception as e:
             logger.error(f"Error extracting insights: {e}")
@@ -382,7 +396,7 @@ class InsightsAnalyzer:
         self._export_debug_prompt(prompt, "insights_aggregation")
 
         try:
-            response = self.llm_client.simple_chat(prompt)
+            response = self.llm_client.simple_chat(prompt, model=self.model)
             return self._parse_aggregation_response(response, all_insights)
         except Exception as e:
             logger.error(f"Error in insights aggregation API call: {e}")

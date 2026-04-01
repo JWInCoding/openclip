@@ -12,6 +12,7 @@ import re
 import time
 import threading
 import tempfile
+import copy
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -19,7 +20,7 @@ from core.file_string_utils import FileStringUtils
 from core.subtitle_burner import SubtitleBurner, SubtitleStyleConfig
 # Import the video orchestrator
 from video_orchestrator import VideoOrchestrator
-from core.config import API_KEY_ENV_VARS, DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, LLM_CONFIG
+from core.config import API_KEY_ENV_VARS, DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, LLM_CONFIG, SUPPORTED_LLM_PROVIDERS
 from core.transcript_generation_whisperx import WHISPERX_AVAILABLE
 from core.downloaders.bilibili_downloader import ImprovedBilibiliDownloader
 
@@ -121,6 +122,8 @@ TRANSLATIONS = {
         'video_url': 'Video URL',
         'local_file_path': 'Local Video File Path',
         'llm_provider': 'LLM Provider',
+        'llm_model': 'LLM Model',
+        'llm_base_url': 'LLM Base URL',
         'api_key': 'API Key',
         'title_style': 'Title Style',
         'language': 'Output Language',
@@ -185,8 +188,12 @@ TRANSLATIONS = {
         'local_file_help': 'Enter the full path to a local video file',
         'local_file_srt_notice': 'To use existing subtitles, place the .srt file in the same directory with the same filename (e.g. video.mp4 → video.srt).',
         'select_llm_provider': 'Select which AI provider to use for analysis',
+        'llm_model_help': 'Override the model name for the selected provider. Leave blank to use the provider default.',
+        'llm_base_url_help': 'Override the OpenAI-compatible chat completions endpoint for the selected provider. Leave blank to use the provider default.',
+        'llm_model_unset': 'No default model is configured for this provider. Enter one below.',
         'enter_api_key': 'Enter API key or leave blank if set as environment variable',
         'api_key_help': 'You can also set the API_KEY environment variable',
+        'custom_openai_api_key_help': 'For custom_openai, API key is optional. Leave it blank if your endpoint does not require Bearer authentication.',
         'select_title_style': 'Select the visual style for titles and covers',
         'select_language': 'Language for analysis and output',
         'enter_output_dir': 'Directory to save processed videos',
@@ -226,6 +233,8 @@ TRANSLATIONS = {
         'video_url': '视频链接',
         'local_file_path': '本地视频文件路径',
         'llm_provider': 'LLM 提供商',
+        'llm_model': 'LLM 模型',
+        'llm_base_url': 'LLM Base URL',
         'api_key': 'API 密钥',
         'title_style': '标题风格',
         'language': '输出语言',
@@ -290,8 +299,12 @@ TRANSLATIONS = {
         'local_file_help': '输入本地视频文件的完整路径',
         'local_file_srt_notice': '如需使用已有字幕，请将 .srt 文件放在同目录下，文件名保持一致（如 video.mp4 → video.srt）。',
         'select_llm_provider': '选择用于分析的 AI 提供商',
+        'llm_model_help': '覆盖当前提供商使用的模型名。留空则使用该提供商的默认配置。',
+        'llm_base_url_help': '覆盖当前提供商使用的 OpenAI 兼容 chat completions 接口地址。留空则使用默认配置。',
+        'llm_model_unset': '当前提供商没有默认模型，请在下方填写。',
         'enter_api_key': '输入 API 密钥或留空（如果已设置为环境变量）',
         'api_key_help': '您也可以设置 API_KEY 环境变量',
+        'custom_openai_api_key_help': '对于 custom_openai，API Key 是可选的。如果你的兼容接口不需要 Bearer 鉴权，可以留空。',
         'select_title_style': '选择标题和封面的视觉风格',
         'select_language': '分析和输出的语言',
         'enter_output_dir': '保存处理后视频的目录',
@@ -326,6 +339,36 @@ TRANSLATIONS = {
     }
 }
 
+
+def build_default_llm_provider_settings():
+    return {
+        provider: {
+            "model": "",
+            "base_url": "",
+        }
+        for provider in SUPPORTED_LLM_PROVIDERS
+    }
+
+
+def backfill_llm_provider_settings(saved: Dict[str, Any]) -> None:
+    settings = saved.get("llm_provider_settings")
+    if not isinstance(settings, dict):
+        settings = {}
+
+    defaults = build_default_llm_provider_settings()
+    for provider, provider_defaults in defaults.items():
+        current = settings.get(provider)
+        if not isinstance(current, dict):
+            current = {}
+        for key, value in provider_defaults.items():
+            current.setdefault(key, value)
+        settings[provider] = current
+
+    saved["llm_provider_settings"] = settings
+    if saved.get("llm_provider") not in SUPPORTED_LLM_PROVIDERS:
+        saved["llm_provider"] = DEFAULT_LLM_PROVIDER
+
+
 # Define default data
 DEFAULT_DATA = {
     # Checkboxes
@@ -346,6 +389,7 @@ DEFAULT_DATA = {
     'input_type': "Video URL",
     'video_source': "",
     'llm_provider': DEFAULT_LLM_PROVIDER,
+    'llm_provider_settings': build_default_llm_provider_settings(),
     'api_key': "",
     'title_style': DEFAULT_TITLE_STYLE,
     'language': "zh",
@@ -375,7 +419,8 @@ def load_from_file():
     # Backfill any new default keys missing from older saved files
     for key, value in DEFAULT_DATA.items():
         if key not in saved:
-            saved[key] = value
+            saved[key] = copy.deepcopy(value)
+    backfill_llm_provider_settings(saved)
     return saved
 
 def save_to_file(data):
@@ -708,24 +753,50 @@ with st.sidebar:
             cookies_file = ""
     
     # LLM provider selection
+    llm_provider_options = list(SUPPORTED_LLM_PROVIDERS)
     llm_provider = st.selectbox(
         t['llm_provider'],
-        options=["qwen", "openrouter", "glm", "minimax"],
-        index=["qwen", "openrouter", "glm", "minimax"].index(data['llm_provider']),
+        options=llm_provider_options,
+        index=llm_provider_options.index(data['llm_provider']),
         help=t['select_llm_provider'],
         key=f"llm_provider_{st.session_state.reset_counter}"
     )
     data['llm_provider'] = llm_provider
-    
-    # Show model info based on provider
-    if llm_provider == "qwen":
-        st.caption(f"ℹ️ Using model: {LLM_CONFIG['qwen']['default_model']}")
-    elif llm_provider == "openrouter":
-        st.caption(f"ℹ️ Using model: {LLM_CONFIG['openrouter']['default_model']}")
-    elif llm_provider == "glm":
-        st.caption(f"ℹ️ Using model: {LLM_CONFIG['glm']['default_model']}")
-    elif llm_provider == "minimax":
-        st.caption(f"ℹ️ Using model: {LLM_CONFIG['minimax']['default_model']}")
+
+    provider_settings = data['llm_provider_settings'].setdefault(
+        llm_provider,
+        {"model": "", "base_url": ""},
+    )
+    provider_default_model = (LLM_CONFIG[llm_provider].get('default_model') or "").strip()
+    provider_default_base_url = (LLM_CONFIG[llm_provider].get('base_url') or "").strip()
+
+    llm_model = st.text_input(
+        t['llm_model'],
+        value=provider_settings.get('model', ''),
+        placeholder=provider_default_model,
+        help=t['llm_model_help'],
+        key=f"llm_model_{st.session_state.reset_counter}"
+    )
+    provider_settings['model'] = llm_model.strip()
+
+    llm_base_url = st.text_input(
+        t['llm_base_url'],
+        value=provider_settings.get('base_url', ''),
+        placeholder=provider_default_base_url,
+        help=t['llm_base_url_help'],
+        key=f"llm_base_url_{st.session_state.reset_counter}"
+    )
+    provider_settings['base_url'] = llm_base_url.strip()
+
+    resolved_llm_model = (provider_settings['model'] or provider_default_model).strip()
+    resolved_llm_base_url = (provider_settings['base_url'] or provider_default_base_url).strip()
+
+    if resolved_llm_model:
+        st.caption(f"ℹ️ Model: {resolved_llm_model}")
+    else:
+        st.caption(f"ℹ️ {t['llm_model_unset']}")
+    if resolved_llm_base_url:
+        st.caption(f"ℹ️ Base URL: {resolved_llm_base_url}")
 
     # API key input (optional, since it can be set via environment variable)
     api_key_env_var = API_KEY_ENV_VARS.get(llm_provider, "QWEN_API_KEY")
@@ -738,6 +809,8 @@ with st.sidebar:
         key=f"api_key_{st.session_state.reset_counter}"
     )
     data['api_key'] = api_key
+    if llm_provider == "custom_openai":
+        st.caption(t['custom_openai_api_key_help'])
     
     title_style = data['title_style']
 
@@ -981,9 +1054,15 @@ with st.sidebar:
     
     # Get API key from input or environment
     resolved_api_key = api_key or os.getenv(api_key_env_var)
+    requires_api_key = llm_provider != "custom_openai"
     
     # Check if we can process (allow concurrent jobs)
-    can_process = bool(video_source and resolved_api_key)
+    can_process = bool(
+        video_source
+        and resolved_llm_model
+        and resolved_llm_base_url
+        and (resolved_api_key or not requires_api_key)
+    )
     
     # Process Video and Reset Form buttons on same row
     btn_col1, btn_col2 = st.columns(2)
@@ -1006,7 +1085,7 @@ with st.sidebar:
     if reset_clicked:
         # Reset all data to defaults
         for key, value in DEFAULT_DATA.items():
-            data[key] = value
+            data[key] = copy.deepcopy(value)
         save_to_file(data)
         # Increment reset counter to force widget recreation
         st.session_state.reset_counter += 1
@@ -1033,6 +1112,8 @@ def process_video_worker(job, progress_callback):
         cookies=options.get('cookies_file') or None,
         api_key=options['api_key'],
         llm_provider=options['llm_provider'],
+        llm_model=options.get('llm_model'),
+        llm_base_url=options.get('llm_base_url'),
         skip_analysis=False,
         generate_clips=options['generate_clips'],
         add_titles=options['add_titles'],
@@ -1327,7 +1408,11 @@ if getattr(st.session_state, 'retry_error', False):
 if process_clicked:
     if not video_source:
         st.error("Please provide a video URL or file path")
-    elif not resolved_api_key:
+    elif not resolved_llm_model:
+        st.error("Please provide an LLM model name or configure the provider default model")
+    elif not resolved_llm_base_url:
+        st.error("Please provide an LLM base URL or configure the provider default base URL")
+    elif requires_api_key and not resolved_api_key:
         st.error(f"Please provide {llm_provider.upper()} API key or set the {api_key_env_var} environment variable")
     else:
         # Create job options
@@ -1336,8 +1421,10 @@ if process_clicked:
             'max_duration_minutes': MAX_DURATION_MINUTES,
             'whisper_model': WHISPER_MODEL,
             'browser': cookie_browser if cookie_mode == 'browser' else None,
-            'api_key': resolved_api_key,
+            'api_key': resolved_api_key or None,
             'llm_provider': llm_provider,
+            'llm_model': provider_settings.get('model') or None,
+            'llm_base_url': provider_settings.get('base_url') or None,
             'generate_clips': generate_clips,
             'add_titles': add_titles,
             'title_style': title_style,

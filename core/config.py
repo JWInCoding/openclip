@@ -31,6 +31,15 @@ def _env_llm_model(provider: str, default: str) -> str:
     return os.getenv(f"{provider.upper()}_MODEL", default)
 
 
+SUPPORTED_LLM_PROVIDERS = (
+    "qwen",
+    "openrouter",
+    "glm",
+    "minimax",
+    "custom_openai",
+)
+
+
 # LLM Client configurations
 LLM_CONFIG: Dict[str, Dict[str, Any]] = {
     "qwen": {
@@ -77,6 +86,16 @@ LLM_CONFIG: Dict[str, Dict[str, Any]] = {
             "top_p": 0.8,
             "stream": False
         }
+    },
+    "custom_openai": {
+        "base_url": _env_llm_base_url("custom_openai", "https://api.openai.com/v1/chat/completions"),
+        "default_model": _env_llm_model("custom_openai", ""),
+        "default_params": {
+            "max_tokens": 32768,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "stream": False
+        }
     }
 }
 
@@ -86,7 +105,8 @@ API_KEY_ENV_VARS: Dict[str, str] = {
     "qwen": "QWEN_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "glm": "GLM_API_KEY",
-    "minimax": "MINIMAX_API_KEY"
+    "minimax": "MINIMAX_API_KEY",
+    "custom_openai": "CUSTOM_OPENAI_API_KEY",
 }
 
 

@@ -12,7 +12,7 @@ from datetime import datetime
 import re
 
 from core.llm.qwen_api_client import QwenAPIClient, QwenMessage
-from core.config import MAX_CLIPS
+from core.config import LLM_CONFIG, MAX_CLIPS
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +20,13 @@ logger = logging.getLogger(__name__)
 class EngagingMomentsAnalyzer:
     """Analyzes video transcripts to identify engaging moments using LLM APIs"""
     
-    def __init__(self, api_key: Optional[str] = None, provider: str = "qwen", use_background: bool = False, language: str = "zh", debug: bool = False, custom_prompt_file: Optional[str] = None, max_clips: int = MAX_CLIPS, user_intent: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, provider: str = "qwen", use_background: bool = False, language: str = "zh", debug: bool = False, custom_prompt_file: Optional[str] = None, max_clips: int = MAX_CLIPS, user_intent: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None):
         """
         Initialize the analyzer
 
         Args:
             api_key: API key for the selected provider (optional, can use env var)
-            provider: LLM provider to use ("qwen" or "openrouter")
+            provider: LLM provider to use ("qwen", "openrouter", "glm", "minimax", or "custom_openai")
             use_background: Whether to include background information in prompts
             language: Language for output ("zh" for Chinese, "en" for English)
             debug: Enable debug mode to export full prompts sent to LLM
@@ -42,22 +42,34 @@ class EngagingMomentsAnalyzer:
         self.background_content = None
         self.language = language
         self.debug = debug
+        self.model = model.strip() if model else None
+        self.base_url = base_url.strip() if base_url else None
+
+        if self.provider == "custom_openai" and not (
+            self.model or LLM_CONFIG["custom_openai"]["default_model"]
+        ):
+            raise ValueError(
+                "custom_openai requires llm_model. Set CUSTOM_OPENAI_MODEL or provide llm_model."
+            )
         
         # Initialize the appropriate LLM client
         if self.provider == "qwen":
             from core.llm.qwen_api_client import QwenAPIClient
-            self.llm_client = QwenAPIClient(api_key)
+            self.llm_client = QwenAPIClient(api_key, base_url=self.base_url)
         elif self.provider == "openrouter":
             from core.llm.openrouter_api_client import OpenRouterAPIClient
-            self.llm_client = OpenRouterAPIClient(api_key)
+            self.llm_client = OpenRouterAPIClient(api_key, base_url=self.base_url)
         elif self.provider == "glm":
             from core.llm.glm_api_client import GLMAPIClient
-            self.llm_client = GLMAPIClient(api_key)
+            self.llm_client = GLMAPIClient(api_key, base_url=self.base_url)
         elif self.provider == "minimax":
             from core.llm.minimax_api_client import MiniMaxAPIClient
-            self.llm_client = MiniMaxAPIClient(api_key)
+            self.llm_client = MiniMaxAPIClient(api_key, base_url=self.base_url)
+        elif self.provider == "custom_openai":
+            from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
+            self.llm_client = CustomOpenAIAPIClient(api_key, base_url=self.base_url)
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', 'glm', and 'minimax'.")
+            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', 'glm', 'minimax', and 'custom_openai'.")
         
         # Load background information if enabled
         if self.use_background:
@@ -348,7 +360,7 @@ class EngagingMomentsAnalyzer:
         
         try:
             # Call LLM API
-            response = self.llm_client.simple_chat(analysis_prompt)
+            response = self.llm_client.simple_chat(analysis_prompt, model=self.model)
             
             # Try to parse JSON response with improved extraction
             try:
@@ -461,7 +473,7 @@ Please fix the JSON and return ONLY the valid JSON, no explanations:
         
         try:
             # Use a simpler model for JSON fixing to avoid recursion
-            fixed_response = self.llm_client.simple_chat(fix_prompt)
+            fixed_response = self.llm_client.simple_chat(fix_prompt, model=self.model)
             
             # Extract JSON from the fixed response
             json_match = re.search(r'```json\s*(\{.*?\})\s*```', fixed_response, re.DOTALL)
@@ -635,7 +647,7 @@ Please fix the JSON and return ONLY the valid JSON, no explanations:
         
         try:
             # Call LLM API for aggregation
-            response = self.llm_client.simple_chat(aggregation_prompt)
+            response = self.llm_client.simple_chat(aggregation_prompt, model=self.model)
             
             # Parse JSON response with improved extraction
             try:
@@ -756,7 +768,7 @@ Please fix the JSON and return ONLY the valid JSON, no explanations:
         
         try:
             # Use a simpler model for JSON fixing
-            fixed_response = self.llm_client.simple_chat(fix_prompt)
+            fixed_response = self.llm_client.simple_chat(fix_prompt, model=self.model)
             
             # Extract JSON from the fixed response
             json_match = re.search(r'```json\s*(\{.*?\})\s*```', fixed_response, re.DOTALL)

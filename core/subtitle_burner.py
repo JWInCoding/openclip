@@ -171,24 +171,29 @@ class SubtitleBurner:
         api_key: str = None,
         provider: str = "qwen",
         model: str = None,
+        base_url: str = None,
+        enable_llm: bool = False,
         subtitle_style_config: SubtitleStyleConfig | None = None,
     ):
         self.model = model  # None → each client uses its config default
         self.subtitle_style_config = (subtitle_style_config or SubtitleStyleConfig()).normalized()
-        if api_key:
+        if enable_llm:
             provider = provider.lower()
             if provider == "openrouter":
                 from core.llm.openrouter_api_client import OpenRouterAPIClient
-                self.client = OpenRouterAPIClient(api_key=api_key)
+                self.client = OpenRouterAPIClient(api_key=api_key, base_url=base_url)
             elif provider == "glm":
                 from core.llm.glm_api_client import GLMAPIClient
-                self.client = GLMAPIClient(api_key=api_key)
+                self.client = GLMAPIClient(api_key=api_key, base_url=base_url)
             elif provider == "minimax":
                 from core.llm.minimax_api_client import MiniMaxAPIClient
-                self.client = MiniMaxAPIClient(api_key=api_key)
+                self.client = MiniMaxAPIClient(api_key=api_key, base_url=base_url)
+            elif provider == "custom_openai":
+                from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
+                self.client = CustomOpenAIAPIClient(api_key=api_key, base_url=base_url)
             else:
                 from core.llm.qwen_api_client import QwenAPIClient
-                self.client = QwenAPIClient(api_key=api_key)
+                self.client = QwenAPIClient(api_key=api_key, base_url=base_url)
         else:
             self.client = None
 
