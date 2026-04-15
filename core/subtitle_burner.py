@@ -214,7 +214,7 @@ class SubtitleBurner:
             )
             family = (result.stdout or "").strip().splitlines()
             if result.returncode == 0 and family and family[0].strip():
-                return family[0].strip()
+                return family[0].strip().split(",")[0].strip()
         except (FileNotFoundError, OSError):
             pass
 
@@ -483,26 +483,38 @@ class SubtitleBurner:
             "- Keep each translation on a single line.\n\n"
             + numbered_lines
         )
-        try:
-            response = self.client.simple_chat(prompt, model=self.model)
-            translated_texts = self._parse_numbered_translation_lines(response, len(segments))
-            if translated_texts is None:
-                logger.warning(
-                    "Translation returned malformed numbered lines; burning original subtitles only."
-                )
-                return None
 
-            return [
-                {
-                    "start": seg["start"],
-                    "end": seg["end"],
-                    "text": translated_texts[i],
-                }
-                for i, seg in enumerate(segments)
-            ]
-        except Exception as e:
-            logger.warning(f"Translation failed ({e}); burning original subtitles only.")
-            return None
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.client.simple_chat(prompt, model=self.model)
+                translated_texts = self._parse_numbered_translation_lines(response, len(segments))
+                if translated_texts is None:
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"Translation returned malformed numbered lines (attempt {attempt}/{max_retries}), retrying..."
+                        )
+                        continue
+                    logger.warning(
+                        "Translation returned malformed numbered lines after all retries; skipping burn."
+                    )
+                    return None
+
+                return [
+                    {
+                        "start": seg["start"],
+                        "end": seg["end"],
+                        "text": translated_texts[i],
+                    }
+                    for i, seg in enumerate(segments)
+                ]
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"Translation failed ({e}), retrying (attempt {attempt}/{max_retries})...")
+                    continue
+                logger.warning(f"Translation failed after all retries ({e}); skipping burn.")
+                return None
+        return None
 
     def _srt_time_to_ass(self, t: str) -> str:
         """Convert SRT time 'HH:MM:SS,mmm' to ASS time 'H:MM:SS.cc'."""
