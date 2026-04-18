@@ -141,8 +141,8 @@ TRANSLATIONS = {
         'user_intent': 'What are you looking for? (optional)',
         'user_intent_help': 'Describe what you want to find, e.g. "Sam\'s predictions about AI timelines" or "funny moments". Leave blank to find the most engaging clips overall.',
         'user_intent_placeholder': 'e.g. Sam\'s predictions about AI timelines',
-        'agentic_analysis': 'Agentic Analysis (Experimental)',
-        'agentic_analysis_help': 'Enable the bounded agentic analysis loop so you can compare it against the current baseline highlight selection.',
+        'agentic_analysis': 'Enhanced Clip Quality',
+        'agentic_analysis_help': 'Runs extra AI review and refinement passes to improve clip selection and boundaries. Slower, but usually produces cleaner standalone clips.',
         'advanced_options': 'Advanced Options',
         'override_analysis_prompt': 'Override Analysis Prompt',
         'override_analysis_prompt_help': 'Replace the default analysis prompt entirely. For developers who want full control over how the LLM analyzes content.',
@@ -254,8 +254,8 @@ TRANSLATIONS = {
         'user_intent': '你想找什么？（可选）',
         'user_intent_help': '描述你想找的内容，例如"Sam对AI时间线的预测"或"搞笑时刻"。留空则自动找最精彩的片段。',
         'user_intent_placeholder': '例如：Sam对AI时间线的预测',
-        'agentic_analysis': 'Agentic Analysis（实验性）',
-        'agentic_analysis_help': '启用有边界的 Agentic 分析流程，方便与当前基线高光选择效果进行对比。',
+        'agentic_analysis': '深度优化',
+        'agentic_analysis_help': '会增加额外的 AI 审查和优化步骤，以提升片段选择和边界质量。处理会更慢，但通常能得到更干净、独立性更强的片段。',
         'advanced_options': '高级选项',
         'override_analysis_prompt': '覆盖分析提示词',
         'override_analysis_prompt_help': '完全替换默认分析提示词。适合想完全控制LLM分析方式的开发者。',
@@ -855,14 +855,6 @@ with st.sidebar:
     )
     data['user_intent'] = user_intent
 
-    agentic_analysis = st.checkbox(
-        t['agentic_analysis'],
-        value=bool(data.get('agentic_analysis', False)),
-        help=t['agentic_analysis_help'],
-        key=f"agentic_analysis_{st.session_state.reset_counter}"
-    )
-    data['agentic_analysis'] = agentic_analysis
-
     # Output directory
     output_dir = st.text_input(
         t['output_dir'],
@@ -888,6 +880,14 @@ with st.sidebar:
         key=f"burn_subtitles_{st.session_state.reset_counter}"
     )
     data['burn_subtitles'] = burn_subtitles
+
+    agentic_analysis = st.checkbox(
+        t['agentic_analysis'],
+        value=bool(data.get('agentic_analysis', False)),
+        help=t['agentic_analysis_help'],
+        key=f"agentic_analysis_{st.session_state.reset_counter}"
+    )
+    data['agentic_analysis'] = agentic_analysis
 
     if burn_subtitles:
         st.markdown(f"**{t['subtitle_style_section']}**")
