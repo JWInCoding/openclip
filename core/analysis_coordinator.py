@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import subprocess
+from time import perf_counter
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -141,6 +142,7 @@ class AnalysisCoordinator:
         final_top_moments, repair_pass_used, verification_report = self._verify_and_finalize(
             top_moments,
             transcript_parts,
+            progress_callback=progress_callback,
         )
         verification_report["run_id"] = run_id
         verification_report_file = transcript_dir / "verification_report.json"
@@ -209,6 +211,7 @@ class AnalysisCoordinator:
         self,
         aggregated: Dict[str, Any],
         transcript_parts: List[str],
+        progress_callback=None,
     ) -> Tuple[Dict[str, Any], bool, Dict[str, Any]]:
         transcript_map = {
             f"part{i+1:02d}": path for i, path in enumerate(transcript_parts)
@@ -218,10 +221,22 @@ class AnalysisCoordinator:
             self._prepare_candidate_for_review(deepcopy(moment), transcript_map)
             for moment in raw_candidates
         ]
+        judge_batches = max(1, (len(reviewed) + self.judge_batch_size - 1) // self.judge_batch_size)
+        logger.info(
+            "🔍 verify_round_1: judging %s candidates in %s batches (batch_size=%s)",
+            len(reviewed),
+            judge_batches,
+            self.judge_batch_size,
+        )
+        if progress_callback:
+            progress_callback("Verifying standalone quality: judge batches...", 60)
         self._apply_verification_batch(
             reviewed,
             batch_size=self.judge_batch_size,
             mode="judge",
+            progress_callback=progress_callback,
+            progress_start=60,
+            progress_end=64,
         )
 
         selected: List[Dict[str, Any]] = []
@@ -249,7 +264,14 @@ class AnalysisCoordinator:
         target = min(getattr(self.analyzer, "max_clips", len(raw_candidates)), len(raw_candidates))
         repair_pass_used = bool(rejected_for_repair)
         repaired_candidates: List[Dict[str, Any]] = []
-        for candidate in rejected_for_repair:
+        total_repairs = len(rejected_for_repair)
+        for repair_index, candidate in enumerate(rejected_for_repair, start=1):
+            if progress_callback and total_repairs:
+                repair_progress = 64 + (repair_index - 1) * 4 / total_repairs
+                progress_callback(
+                    f"Verifying standalone quality: repair {repair_index}/{total_repairs}...",
+                    repair_progress,
+                )
             repaired = self._attempt_boundary_repair(candidate, transcript_map)
             if repaired is None:
                 if candidate.get("_repair_planner_attempted"):
@@ -263,10 +285,27 @@ class AnalysisCoordinator:
                 continue
             repaired_candidates.append(repaired)
 
+        rejudge_batches = (
+            max(1, (len(repaired_candidates) + self.rejudge_batch_size - 1) // self.rejudge_batch_size)
+            if repaired_candidates
+            else 0
+        )
+        if repaired_candidates:
+            logger.info(
+                "🔁 verify_round_1: rejudging %s repaired candidates in %s batches (batch_size=%s)",
+                len(repaired_candidates),
+                rejudge_batches,
+                self.rejudge_batch_size,
+            )
+            if progress_callback:
+                progress_callback("Verifying standalone quality: rejudge batches...", 68)
         self._apply_verification_batch(
             repaired_candidates,
             batch_size=self.rejudge_batch_size,
             mode="rejudge",
+            progress_callback=progress_callback,
+            progress_start=68,
+            progress_end=69.5,
         )
         for repaired in repaired_candidates:
             if repaired["_passes_llm"] and repaired["_passes_deterministic"]:
@@ -301,6 +340,19 @@ class AnalysisCoordinator:
                 cleaned["whisper_subtitle_source"] = whisper_source
             cleaned["rank"] = rank
             finalized_moments.append(cleaned)
+
+        kept_count = sum(1 for clip in verification_clips if clip.get("decision") == "kept")
+        repaired_count = sum(1 for clip in verification_clips if clip.get("decision") == "repaired")
+        rejected_count = sum(1 for clip in verification_clips if clip.get("decision") == "rejected")
+        logger.info(
+            "📊 verify_round_1 complete: kept=%s repaired=%s rejected=%s final_selected=%s",
+            kept_count,
+            repaired_count,
+            rejected_count,
+            len(finalized_moments),
+        )
+        if progress_callback:
+            progress_callback("Verifying standalone quality complete", 70)
 
         final_result = {
             "top_engaging_moments": finalized_moments,
@@ -599,15 +651,53 @@ class AnalysisCoordinator:
         candidates: List[Dict[str, Any]],
         batch_size: int,
         mode: str,
+        progress_callback=None,
+        progress_start: Optional[float] = None,
+        progress_end: Optional[float] = None,
     ) -> None:
         if not candidates:
             return
 
-        verification_results = self._run_llm_verification_batch(
-            candidates,
-            batch_size=batch_size,
-            mode=mode,
-        )
+        total_batches = max(1, (len(candidates) + batch_size - 1) // batch_size)
+        verification_results: List[Dict[str, Any]] = []
+        mode_label = "Judge" if mode == "judge" else "Rejudge"
+        for batch_index in range(total_batches):
+            start = batch_index * batch_size
+            end = min(start + batch_size, len(candidates))
+            logger.info(
+                "🧠 %s batch %s/%s: candidates %s-%s",
+                mode_label,
+                batch_index + 1,
+                total_batches,
+                start + 1,
+                end,
+            )
+            batch_started_at = perf_counter()
+            verification_results.extend(
+                self._run_llm_verification_batch(
+                    candidates[start:end],
+                    batch_size=batch_size,
+                    mode=mode,
+                )
+            )
+            logger.info(
+                "✅ %s batch %s/%s completed in %.1fs",
+                mode_label,
+                batch_index + 1,
+                total_batches,
+                perf_counter() - batch_started_at,
+            )
+            if (
+                progress_callback
+                and progress_start is not None
+                and progress_end is not None
+                and total_batches > 0
+            ):
+                progress = progress_start + (batch_index + 1) * (progress_end - progress_start) / total_batches
+                progress_callback(
+                    f"Verifying standalone quality: {mode_label.lower()} batch {batch_index + 1}/{total_batches}...",
+                    progress,
+                )
         for candidate, llm_verification in zip(candidates, verification_results):
             self._apply_llm_verification_result(candidate, llm_verification, mode=mode)
 
@@ -1192,6 +1282,12 @@ Context after:
         if diagnosis in {"none", "not_fixable_content", "missing_clip_transcript"}:
             return None
 
+        logger.info(
+            "🛠️ Repair planner: attempting boundary repair for '%s' (diagnosis=%s)",
+            candidate.get("title", "Untitled clip"),
+            diagnosis,
+        )
+
         verification_context = {
             "actual_clip_excerpt": "",
             "context_before": "",
@@ -1211,6 +1307,11 @@ Context after:
         candidate["_repairable"] = repair_plan.get("repairable")
         candidate["_planner_reason"] = repair_plan.get("reason")
         if not repair_plan.get("repairable"):
+            logger.info(
+                "❌ Repair planner: no usable repair for '%s' (%s)",
+                candidate.get("title", "Untitled clip"),
+                candidate.get("_planner_reason") or "planner marked clip as not repairable",
+            )
             return None
 
         suggested_start = repair_plan.get("suggested_start_time")
@@ -1222,11 +1323,19 @@ Context after:
             suggested_end,
         )
         if not snapped_start or not snapped_end:
+            logger.info(
+                "❌ Repair planner: failed to derive repaired window for '%s'",
+                candidate.get("title", "Untitled clip"),
+            )
             return None
         if (
             snapped_start == candidate["timing"]["start_time"]
             and snapped_end == candidate["timing"]["end_time"]
         ):
+            logger.info(
+                "❌ Repair planner: suggested window unchanged for '%s'",
+                candidate.get("title", "Untitled clip"),
+            )
             return None
 
         repaired = deepcopy(candidate)
@@ -1240,6 +1349,10 @@ Context after:
             snapped_end,
         )
         if not coverage_entries:
+            logger.info(
+                "❌ Repair planner: repaired window had no transcript coverage for '%s'",
+                candidate.get("title", "Untitled clip"),
+            )
             return None
 
         duration_ok, duration_seconds = self._check_duration(repaired)
@@ -1262,6 +1375,12 @@ Context after:
         repaired["_old_end_time"] = candidate["timing"]["end_time"]
         repaired["_verification_context"] = verification_context
         repaired["_coverage_entries"] = coverage_entries
+        logger.info(
+            "✅ Repair planner: produced repaired window %s -> %s for '%s'",
+            snapped_start,
+            snapped_end,
+            candidate.get("title", "Untitled clip"),
+        )
         return repaired
 
     def _derive_repaired_window(
