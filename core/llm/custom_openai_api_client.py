@@ -94,9 +94,21 @@ class CustomOpenAIAPIClient:
                     )
                     time.sleep(wait)
                     continue
-                raise Exception(f"API request failed: {exc}") from exc
+                response_details = self._format_error_response(response)
+                raise Exception(
+                    f"API request failed: {exc}. Response body: {response_details}"
+                ) from exc
             except requests.exceptions.RequestException as exc:
                 raise Exception(f"API request failed: {exc}") from exc
+
+    @staticmethod
+    def _format_error_response(response: requests.Response) -> str:
+        """Return a compact error payload for HTTP failures."""
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = response.text.strip()
+        return str(payload) if payload else "<empty>"
 
     @staticmethod
     def _extract_content(message: Dict[str, Any]) -> str:
@@ -130,7 +142,6 @@ class CustomOpenAIAPIClient:
                 "Model is required for custom_openai. "
                 "Set CUSTOM_OPENAI_MODEL or pass llm_model."
             )
-
         max_tokens = max_tokens or LLM_CONFIG["custom_openai"]["default_params"]["max_tokens"]
         temperature = temperature or LLM_CONFIG["custom_openai"]["default_params"]["temperature"]
         top_p = top_p or LLM_CONFIG["custom_openai"]["default_params"]["top_p"]
