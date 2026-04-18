@@ -18,7 +18,7 @@
 ## 📢 最新动态
 
 - **2026-04-19**:
-  - 新增 `--deep-optimize` / Streamlit「深度优化」模式：在候选片段汇总后增加 AI 复审、边界修复与复审流程，以提升片段边界与独立成段质量，详见[开启 `--deep-optimize` 时](#开启---deep-optimize-时)
+  - 新增 `--deep-optimize` / Streamlit「深度优化」模式：在候选片段汇总后增加一轮更深入的 AI 检查与边界修正，以提升片段边界质量和独立成段效果，详见[开启 `--deep-optimize` 时](#开启---deep-optimize-时)
 - **2026-04-04**:
   - 新增 `custom_openai` 提供商，可在 Streamlit 或 CLI 中自定义 `LLM Model` 与 `LLM Base URL`，对接本地或自建 OpenAI 兼容接口
   - 新增 [Paraformer 中文 ASR 支持](#paraformer-installation)，本地 ASR 会自动按语言路由，中文优先使用 Paraformer
