@@ -22,6 +22,7 @@ from core.video_splitter import VideoSplitter
 from core.transcript_generation_whisper import TranscriptProcessor
 from core.engaging_moments_analyzer import EngagingMomentsAnalyzer
 from core.insights_analyzer import InsightsAnalyzer
+from core.analysis_coordinator import AnalysisCoordinator
 from core.clip_generator import ClipGenerator
 from core.title_adder import TitleAdder, TITLE_FONT_SIZES
 from core.subtitle_burner import SubtitleBurner, SubtitleStyleConfig
@@ -85,6 +86,7 @@ class VideoOrchestrator:
                 subtitle_style_bilingual_layout: str = "auto",
                 subtitle_style_background_style: str = "none",
                 user_intent: Optional[str] = None,
+                agentic_analysis: bool = False,
                 normalize_boundaries: bool = True):
         """
         Initialize the video orchestrator
@@ -125,6 +127,7 @@ class VideoOrchestrator:
         self.custom_prompt_file = custom_prompt_file
         self.use_background = use_background
         self.mode = mode
+        self.agentic_analysis = agentic_analysis
         self.title_font_size = TITLE_FONT_SIZES.get(title_font_size, 40)
         self.cover_text_location = cover_text_location
         self.cover_fill_color = cover_fill_color
@@ -151,6 +154,7 @@ class VideoOrchestrator:
         self.skip_analysis = skip_analysis
         self.engaging_moments_analyzer = None
         self.insights_analyzer = None
+        self.analysis_coordinator = None
         analysis_capable_without_api_key = self.llm_provider == "custom_openai"
         if not skip_analysis and (api_key or analysis_capable_without_api_key):
             try:
@@ -178,6 +182,10 @@ class VideoOrchestrator:
                         max_clips=max_clips,
                         user_intent=user_intent,
                     )
+                    if self.agentic_analysis:
+                        self.analysis_coordinator = AnalysisCoordinator(
+                            self.engaging_moments_analyzer
+                        )
                 logger.info(f"🧠 Engaging moments analysis: enabled (provider: {self.llm_provider}, language: {language}, mode: {mode}, background: {'yes' if use_background else 'no'})")
             except ValueError as e:
                 if self.llm_provider == "custom_openai":
@@ -249,6 +257,10 @@ class VideoOrchestrator:
         logger.info(f"🎬 Video Orchestrator initialized")
         logger.info(f"📁 Output directory: {self.output_dir}")
         logger.info(f"🤖 English Whisper model: {whisper_model}")
+        if self.agentic_analysis and self.mode == "engaging_moments":
+            logger.info("🧪 Agentic analysis: enabled (experimental)")
+        else:
+            logger.info("🧪 Agentic analysis: disabled")
 
     async def process_video(self,
                           source: str,
@@ -413,8 +425,12 @@ class VideoOrchestrator:
                     logger.info("💡 Step 4: Extracting insights...")
                     engaging_result = await self._analyze_insights(result, progress_callback)
                 else:
-                    logger.info("🧠 Step 4: Analyzing engaging moments...")
-                    engaging_result = await self._analyze_engaging_moments(result, progress_callback)
+                    if self.agentic_analysis and self.analysis_coordinator:
+                        logger.info("🧠 Step 4: Running agentic engaging moments analysis...")
+                        engaging_result = await self._analyze_engaging_moments_agentic(result, progress_callback)
+                    else:
+                        logger.info("🧠 Step 4: Analyzing engaging moments...")
+                        engaging_result = await self._analyze_engaging_moments(result, progress_callback)
                 result.engaging_moments_analysis = engaging_result
             elif self.skip_analysis:
                 logger.info("🧠 Step 4: Skipping analysis (--skip-analysis)")
@@ -497,7 +513,7 @@ class VideoOrchestrator:
                             if (source_clips_dir / name).exists()
                         ):
                             total += 1
-                            srt = mp4.with_suffix(".srt")
+                            srt = self.subtitle_burner.preferred_subtitle_path_for_clip(mp4)
                             ass_path = ass_tmp_dir / mp4.with_suffix(".ass").name
                             if srt.exists():
                                 self.subtitle_burner.prepare_ass_for_clip(
@@ -807,6 +823,39 @@ class VideoOrchestrator:
                 'aggregated_file': None,
                 'top_moments': None,
                 'total_parts_analyzed': 0
+            }
+
+    async def _analyze_engaging_moments_agentic(self,
+                                                result: ProcessingResult,
+                                                progress_callback: Optional[Callable[[str, float], None]]) -> Dict[str, Any]:
+        """Analyze engaging moments using the optional bounded coordinator loop."""
+        try:
+            if progress_callback:
+                progress_callback("Running agentic analysis...", 50)
+
+            if result.was_split and result.transcript_parts and self.analysis_coordinator:
+                return await self.analysis_coordinator.run(
+                    result.transcript_parts,
+                    progress_callback=progress_callback,
+                )
+
+            logger.warning("No transcript available for agentic engaging moments analysis")
+            return {
+                'highlights_files': [],
+                'aggregated_file': None,
+                'top_moments': None,
+                'total_parts_analyzed': 0,
+                'agentic_analysis': True,
+            }
+        except Exception as e:
+            logger.error(f"Error in agentic engaging moments analysis: {e}")
+            return {
+                'error': str(e),
+                'highlights_files': [],
+                'aggregated_file': None,
+                'top_moments': None,
+                'total_parts_analyzed': 0,
+                'agentic_analysis': True,
             }
 
     async def _analyze_insights(self,
@@ -1213,6 +1262,8 @@ Note: Set the API key environment variable for your selected provider when requi
                        help='Free-text description of what you are looking for '
                             '(e.g. "moments about AI risks"). Steers LLM clip selection '
                             'and ranking toward this focus.')
+    parser.add_argument('--deep-optimize', dest='agentic_analysis', action='store_true',
+                       help='Run the deeper clip review and refinement workflow for better standalone clip quality')
     parser.add_argument('--normalize-boundaries', dest='normalize_boundaries', action='store_true',
                        help='Normalize both clip start and end times to nearby subtitle boundaries')
     parser.add_argument('--no-normalize-boundaries', dest='normalize_boundaries', action='store_false',
@@ -1275,6 +1326,7 @@ Note: Set the API key environment variable for your selected provider when requi
         subtitle_style_bilingual_layout="auto",
         subtitle_style_background_style="none",
         user_intent=args.user_intent,
+        agentic_analysis=args.agentic_analysis,
         normalize_boundaries=args.normalize_boundaries,
     )
     

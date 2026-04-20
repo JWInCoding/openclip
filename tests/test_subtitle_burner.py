@@ -1,4 +1,9 @@
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
+from PIL import Image, ImageChops
 
 from core.subtitle_burner import SubtitleBurner
 
@@ -118,3 +123,123 @@ def test_build_ass_filter_value_escapes_filter_special_chars(monkeypatch, tmp_pa
     filter_value = SubtitleBurner.build_ass_filter_value(tmp_path / "clip.ass", language="en")
 
     assert "fontsdir=C\\:/Windows/Fonts" in filter_value
+
+
+def test_font_family_from_path_uses_primary_family_name(monkeypatch):
+    class CompletedProcess:
+        returncode = 0
+        stdout = "Heiti TC,黑體-繁,黒体-繁\n"
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: CompletedProcess(),
+    )
+
+    family = SubtitleBurner._font_family_from_path("/System/Library/Fonts/STHeiti Light.ttc")
+
+    assert family == "Heiti TC"
+
+
+def test_generate_preview_image_renders_subtitles(tmp_path):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("ffmpeg is not installed")
+
+    filters = subprocess.run(
+        [ffmpeg, "-hide_banner", "-filters"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if " ass " not in filters.stdout:
+        pytest.skip("ffmpeg was built without libass support")
+
+    burner = SubtitleBurner()
+    background_path = tmp_path / "background.png"
+    baseline_video_path = tmp_path / "baseline.mp4"
+    baseline_path = tmp_path / "baseline.png"
+    preview_path = tmp_path / "preview.png"
+
+    burner._create_preview_background(background_path)
+    subprocess.run(
+        [
+            ffmpeg,
+            "-loop", "1",
+            "-i", str(background_path),
+            "-t", "2",
+            "-pix_fmt", "yuv420p",
+            "-an",
+            "-y", str(baseline_video_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    subprocess.run(
+        [
+            ffmpeg,
+            "-ss", "0.5",
+            "-i", str(baseline_video_path),
+            "-frames:v", "1",
+            "-update", "1",
+            "-y", str(baseline_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    ok = burner.generate_preview_image(
+        preview_path,
+        original_text="Preview subtitle",
+    )
+
+    assert ok is True
+    assert baseline_path.exists()
+    assert preview_path.exists()
+    diff = ImageChops.difference(Image.open(baseline_path), Image.open(preview_path))
+    assert diff.getbbox() is not None
+
+
+def test_preferred_subtitle_path_for_clip_prefers_whisper_sidecar(tmp_path):
+    mp4 = tmp_path / "rank_01_test.mp4"
+    mp4.write_bytes(b"video")
+    original_srt = tmp_path / "rank_01_test.srt"
+    original_srt.write_text("original", encoding="utf-8")
+    whisper_srt = tmp_path / "rank_01_test.whisper.srt"
+    whisper_srt.write_text("whisper", encoding="utf-8")
+
+    preferred = SubtitleBurner.preferred_subtitle_path_for_clip(mp4)
+
+    assert preferred == whisper_srt
+
+
+def test_burn_subtitles_for_clips_uses_whisper_sidecar_when_available(tmp_path, monkeypatch):
+    clips_dir = tmp_path / "clips"
+    output_dir = tmp_path / "out"
+    clips_dir.mkdir()
+    mp4 = clips_dir / "rank_01_test.mp4"
+    mp4.write_bytes(b"video")
+    (clips_dir / "rank_01_test.srt").write_text("original", encoding="utf-8")
+    whisper_srt = clips_dir / "rank_01_test.whisper.srt"
+    whisper_srt.write_text("whisper", encoding="utf-8")
+
+    burner = SubtitleBurner()
+    used_subtitles = []
+
+    def fake_process_clip(mp4_path, srt_path, output_path, subtitle_translation=None):
+        used_subtitles.append(Path(srt_path))
+        return True
+
+    monkeypatch.setattr(burner, "_process_clip", fake_process_clip)
+
+    result = burner.burn_subtitles_for_clips(str(clips_dir), str(output_dir))
+
+    assert result["success"] is True
+    assert used_subtitles == [whisper_srt]

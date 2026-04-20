@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import core.transcript_generation_whisper as transcript_module
 from core.transcript_generation_whisper import (
     TranscriptProcessor,
+    build_whisper_initial_prompt,
     select_transcript_backend,
     summarize_transcript_sources,
 )
@@ -30,6 +31,14 @@ def test_select_transcript_backend_falls_back_when_paraformer_is_unavailable():
 
 def test_summarize_transcript_sources_handles_mixed_sources():
     assert summarize_transcript_sources(["paraformer", "whisper", "paraformer"]) == "mixed:paraformer,whisper"
+
+
+def test_build_whisper_initial_prompt_prefers_simplified_chinese_for_zh():
+    assert build_whisper_initial_prompt("zh") == "以下是普通话的简体中文字幕。"
+
+
+def test_build_whisper_initial_prompt_ignores_non_chinese_languages():
+    assert build_whisper_initial_prompt("en") is None
 
 
 class FakeParaformerProcessor:

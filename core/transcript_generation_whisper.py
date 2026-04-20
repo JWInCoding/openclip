@@ -48,6 +48,19 @@ def summarize_transcript_sources(sources: List[str]) -> str:
         return unique_sources[0]
     return "mixed:" + ",".join(unique_sources)
 
+
+def build_whisper_initial_prompt(language: Optional[str]) -> Optional[str]:
+    """Return a style prompt for Whisper when a language benefits from steering.
+
+    Whisper uses a single `zh` language code for Chinese, and OpenAI maintainers
+    recommend `initial_prompt` to bias the transcript style toward simplified
+    or traditional script. We prefer Simplified Chinese for Chinese transcripts.
+    """
+    normalized = (language or "").strip().lower()
+    if normalized.startswith("zh") or normalized == "chinese":
+        return "以下是普通话的简体中文字幕。"
+    return None
+
 def run_whisper_cli(file_path, model_name=WHISPER_MODEL, language=None, output_format="srt", output_dir=None):
     """
     Transcribe audio/video file using OpenAI Whisper CLI
@@ -71,12 +84,17 @@ def run_whisper_cli(file_path, model_name=WHISPER_MODEL, language=None, output_f
 
     if output_dir:
         cmd.extend(["--output_dir", str(output_dir)])
-    
+
     if language:
         cmd.extend(["--language", language])
         print(f"🌍 Language: {language}")
     else:
         print("🔍 Language: Auto-detection")
+
+    initial_prompt = build_whisper_initial_prompt(language)
+    if initial_prompt:
+        cmd.extend(["--initial_prompt", initial_prompt])
+        print("🈶 Script preference: Simplified Chinese")
     
     try:
         print("\n⏳ Running Whisper...")

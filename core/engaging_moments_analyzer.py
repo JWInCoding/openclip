@@ -668,6 +668,81 @@ Please fix the JSON and return ONLY the valid JSON, no explanations:
             result = self._create_fallback_aggregation(all_moments)
         
         return result
+
+    def build_pre_verify_pool(self, highlights_files: List[str], pool_size: int) -> Dict[str, Any]:
+        """
+        Build a lightweight deterministic pre-verification pool for agentic analysis.
+
+        This intentionally avoids the heavier LLM-based global aggregation used by the
+        non-agentic path. It concatenates part-level candidates, normalizes their shape,
+        drops exact duplicate windows, and caps the pool deterministically.
+        """
+        logger.info("🧺 Building deterministic pre-verification pool...")
+
+        if pool_size <= 0:
+            return self._create_empty_aggregation_result()
+
+        all_moments: List[Dict[str, Any]] = []
+        seen_windows: set[tuple[str, str, str]] = set()
+
+        for file_path in highlights_files:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.error(f"Error loading highlights file {file_path}: {e}")
+                continue
+
+            video_part = data.get('video_part', 'unknown')
+            for idx, raw_moment in enumerate(data.get('engaging_moments', []), start=1):
+                moment = dict(raw_moment)
+                start_time = moment.get('start_time', '00:00:00')
+                end_time = moment.get('end_time', '00:00:00')
+                source_key = (video_part, start_time, end_time)
+                if source_key in seen_windows:
+                    continue
+                seen_windows.add(source_key)
+
+                moment['_source_video_part'] = video_part
+                moment['_source_rank'] = idx
+                if 'timing' not in moment:
+                    moment['timing'] = {
+                        'video_part': video_part,
+                        'start_time': start_time,
+                        'end_time': end_time,
+                        'duration': f"{moment.get('duration_seconds', 0)}s",
+                    }
+                all_moments.append(moment)
+
+        if not all_moments:
+            logger.warning("No engaging moments found for pre-verification pool")
+            return self._create_empty_aggregation_result()
+
+        top_moments = all_moments[:pool_size]
+        for i, moment in enumerate(top_moments, start=1):
+            moment['rank'] = i
+            if 'timing' not in moment:
+                moment['timing'] = {
+                    'video_part': moment.pop('_source_video_part', 'unknown'),
+                    'start_time': moment.get('start_time', '00:00:00'),
+                    'end_time': moment.get('end_time', '00:00:00'),
+                    'duration': f"{moment.get('duration_seconds', 0)}s",
+                }
+
+        return {
+            "top_engaging_moments": top_moments,
+            "total_moments": len(top_moments),
+            "analysis_timestamp": datetime.now().isoformat() + 'Z',
+            "aggregation_criteria": (
+                "Deterministic pre-verification pool built from per-part engaging moments"
+            ),
+            "analysis_summary": {
+                "highest_engagement_themes": [],
+                "total_engaging_content_time": "N/A",
+                "recommendation": "Pre-verification pool assembled deterministically before standalone review",
+            },
+            "honorable_mentions": [],
+        }
     
     def _extract_and_parse_aggregation_json(self, response: str) -> Dict[str, Any]:
         """

@@ -214,7 +214,9 @@ class SubtitleBurner:
             )
             family = (result.stdout or "").strip().splitlines()
             if result.returncode == 0 and family and family[0].strip():
-                return family[0].strip().split(",")[0].strip()
+                primary_family = family[0].split(",", 1)[0].strip()
+                if primary_family:
+                    return primary_family
         except (FileNotFoundError, OSError):
             pass
 
@@ -255,11 +257,11 @@ class SubtitleBurner:
         clip_filenames=None, clip_titles: dict = None,
     ) -> dict:
         """
-        Process MP4+SRT pairs in clips_dir and write subtitle-burned
+        Process MP4+subtitle pairs in clips_dir and write subtitle-burned
         versions to output_dir.
 
         Args:
-            clips_dir: Directory containing .mp4 and .srt files.
+            clips_dir: Directory containing .mp4 files and subtitle sidecars.
             output_dir: Directory to write burned clips to.
             subtitle_translation: If set (e.g. "Simplified Chinese"), translate
                 the SRT to that language and burn both tracks. Requires api_key.
@@ -286,12 +288,13 @@ class SubtitleBurner:
         processed_clips = []
         total = 0
         for mp4 in mp4_files:
-            srt = mp4.with_suffix(".srt")
+            srt = self.preferred_subtitle_path_for_clip(mp4)
             if not srt.exists():
                 logger.warning(f"No SRT for {mp4.name}, skipping subtitle burn")
                 continue
             total += 1
-            logger.info(f"  Burning subtitles: {mp4.name}")
+            subtitle_source = "whisper" if srt.name.endswith(".whisper.srt") else "original"
+            logger.info(f"  Burning subtitles: {mp4.name} ({subtitle_source})")
             ok = self._process_clip(
                 mp4, srt, output_dir / mp4.name, subtitle_translation
             )
@@ -309,6 +312,14 @@ class SubtitleBurner:
             "failed_clips": total - successful,
             "processed_clips": processed_clips,
         }
+
+    @staticmethod
+    def preferred_subtitle_path_for_clip(mp4: Path) -> Path:
+        """Prefer a Whisper sidecar when present, otherwise fall back to the default SRT."""
+        whisper_srt = mp4.with_suffix(".whisper.srt")
+        if whisper_srt.exists():
+            return whisper_srt
+        return mp4.with_suffix(".srt")
 
     def prepare_ass_for_clip(
         self, srt_path: Path, ass_path: Path, subtitle_translation: str = None
@@ -483,38 +494,26 @@ class SubtitleBurner:
             "- Keep each translation on a single line.\n\n"
             + numbered_lines
         )
-
-        max_retries = 3
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = self.client.simple_chat(prompt, model=self.model)
-                translated_texts = self._parse_numbered_translation_lines(response, len(segments))
-                if translated_texts is None:
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"Translation returned malformed numbered lines (attempt {attempt}/{max_retries}), retrying..."
-                        )
-                        continue
-                    logger.warning(
-                        "Translation returned malformed numbered lines after all retries; skipping burn."
-                    )
-                    return None
-
-                return [
-                    {
-                        "start": seg["start"],
-                        "end": seg["end"],
-                        "text": translated_texts[i],
-                    }
-                    for i, seg in enumerate(segments)
-                ]
-            except Exception as e:
-                if attempt < max_retries:
-                    logger.warning(f"Translation failed ({e}), retrying (attempt {attempt}/{max_retries})...")
-                    continue
-                logger.warning(f"Translation failed after all retries ({e}); skipping burn.")
+        try:
+            response = self.client.simple_chat(prompt, model=self.model)
+            translated_texts = self._parse_numbered_translation_lines(response, len(segments))
+            if translated_texts is None:
+                logger.warning(
+                    "Translation returned malformed numbered lines; burning original subtitles only."
+                )
                 return None
-        return None
+
+            return [
+                {
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": translated_texts[i],
+                }
+                for i, seg in enumerate(segments)
+            ]
+        except Exception as e:
+            logger.warning(f"Translation failed ({e}); burning original subtitles only.")
+            return None
 
     def _srt_time_to_ass(self, t: str) -> str:
         """Convert SRT time 'HH:MM:SS,mmm' to ASS time 'H:MM:SS.cc'."""
@@ -672,30 +671,76 @@ class SubtitleBurner:
         tmp_fd, tmp_ass_str = tempfile.mkstemp(suffix=".ass")
         os.close(tmp_fd)
         tmp_ass = Path(tmp_ass_str)
+        tmp_bg_video = tmp_ass.with_suffix(".mp4")
+        tmp_burned_video = tmp_ass.with_name(f"{tmp_ass.stem}_burned.mp4")
         try:
             tmp_ass.write_bytes(ass.read_bytes())
-            cmd = [
+
+            background_cmd = [
                 "ffmpeg",
                 "-loop", "1",
                 "-i", str(background.resolve()),
-                "-vf", self.build_ass_filter_value(tmp_ass.name, language="zh"),
-                "-frames:v", "1",
-                "-y", str(output.resolve()),
+                "-t", "2",
+                "-pix_fmt", "yuv420p",
+                "-an",
+                "-y", str(tmp_bg_video.resolve()),
             ]
-            r = subprocess.run(
-                cmd,
+            background_result = subprocess.run(
+                background_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if background_result.returncode != 0:
+                stderr_tail = (background_result.stderr or "")[-500:]
+                logger.error(f"ffmpeg preview background video error: {stderr_tail}")
+                return False
+
+            burn_cmd = [
+                "ffmpeg",
+                "-i", str(tmp_bg_video.resolve()),
+                "-vf", self.build_ass_filter_value(tmp_ass.name, language="zh"),
+                "-pix_fmt", "yuv420p",
+                "-an",
+                "-y", str(tmp_burned_video.resolve()),
+            ]
+            burn_result = subprocess.run(
+                burn_cmd,
                 cwd=str(tmp_ass.parent),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
             )
-            if r.returncode != 0:
-                stderr_tail = (r.stderr or "")[-500:]
+            if burn_result.returncode != 0:
+                stderr_tail = (burn_result.stderr or "")[-500:]
                 logger.error(f"ffmpeg preview subtitle error: {stderr_tail}")
-            return r.returncode == 0
+                return False
+
+            frame_cmd = [
+                "ffmpeg",
+                "-ss", "0.5",
+                "-i", str(tmp_burned_video.resolve()),
+                "-frames:v", "1",
+                "-update", "1",
+                "-y", str(output.resolve()),
+            ]
+            frame_result = subprocess.run(
+                frame_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if frame_result.returncode != 0:
+                stderr_tail = (frame_result.stderr or "")[-500:]
+                logger.error(f"ffmpeg preview frame extraction error: {stderr_tail}")
+            return frame_result.returncode == 0
         finally:
             tmp_ass.unlink(missing_ok=True)
+            tmp_bg_video.unlink(missing_ok=True)
+            tmp_burned_video.unlink(missing_ok=True)
 
     def _burn_ass(self, mp4: Path, ass: Path, output: Path) -> bool:
         """Run ffmpeg to burn the ASS subtitle file into the video."""
