@@ -590,19 +590,23 @@ class SubtitleBurner:
             original_color = preset.translation_color
             original_margin = layout["translation_margin"]
 
+        # MarginL/MarginR: leave ~5% of PlayResX on each side so long lines
+        # wrap before hitting the screen edge (100px on a 1920-wide canvas ≈ 5%)
+        side_margin = int(ASS_PLAY_RES_X * 0.05)
+
         original_style = (
             "Style: Original,"
             f"{font_name},{font_size},{original_color},&H000000FF,"
             f"{outline_color},{back_color},{preset.bold},0,0,0,"
             f"100,100,0,0,{border_style},"
-            f"{preset.outline},{shadow},{ASS_ALIGNMENT_BOTTOM_CENTER},10,10,{original_margin},1"
+            f"{preset.outline},{shadow},{ASS_ALIGNMENT_BOTTOM_CENTER},{side_margin},{side_margin},{original_margin},1"
         )
         translation_style = (
             "Style: Translation,"
             f"{font_name},{font_size},{preset.translation_color},&H000000FF,"
             f"{outline_color},{back_color},{preset.bold},0,0,0,"
             f"100,100,0,0,{border_style},"
-            f"{preset.outline},{shadow},{ASS_ALIGNMENT_BOTTOM_CENTER},10,10,{layout['translation_margin']},1"
+            f"{preset.outline},{shadow},{ASS_ALIGNMENT_BOTTOM_CENTER},{side_margin},{side_margin},{layout['translation_margin']},1"
         )
 
         header = "\n".join(
@@ -612,6 +616,7 @@ class SubtitleBurner:
                 f"PlayResX: {ASS_PLAY_RES_X}",
                 f"PlayResY: {ASS_PLAY_RES_Y}",
                 "ScaledBorderAndShadow: yes",
+                "WrapStyle: 1",
                 "",
                 "[V4+ Styles]",
                 "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
