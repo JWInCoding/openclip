@@ -22,8 +22,12 @@ const manifestProject = {
       absolute_end_time: '00:00:20',
       absolute_time_range: '00:00:05 - 00:00:20',
       asset_registry: { current_composed_clip: 'clips_post_processed/clip-real-1.mp4' },
+      subtitle_segments: [
+        { start_time: '00:00:00,000', end_time: '00:00:02,500', text: 'Loaded subtitle' },
+        { start_time: '00:00:02,500', end_time: '00:00:05,000', text: 'Second loaded line' },
+      ],
       subtitle_recipe: { override_text: 'Loaded subtitle' },
-      effective_subtitle_text: 'Loaded subtitle',
+      effective_subtitle_text: 'Loaded subtitle\nSecond loaded line',
       has_manual_subtitle_override: true,
       cover_recipe: { text: 'Loaded cover' },
       current_composed_clip_url: '/api/projects/proj-real/media/clips_post_processed/clip-real-1.mp4',
@@ -42,6 +46,9 @@ const manifestProject = {
       absolute_end_time: '00:00:40',
       absolute_time_range: '00:00:25 - 00:00:40',
       asset_registry: { current_composed_clip: 'clips_post_processed/clip-real-2.mp4' },
+      subtitle_segments: [
+        { start_time: '00:00:00,000', end_time: '00:00:03,000', text: 'Second subtitle' },
+      ],
       subtitle_recipe: { override_text: 'Second subtitle' },
       effective_subtitle_text: 'Second subtitle',
       has_manual_subtitle_override: false,
@@ -103,6 +110,7 @@ describe('OpenClip editor shell', () => {
 
   const zh = (key: Parameters<typeof t>[1], values?: Parameters<typeof t>[2]) => t('zh', key, values)
   const en = (key: Parameters<typeof t>[1], values?: Parameters<typeof t>[2]) => t('en', key, values)
+  const getTimelinePreviewVideo = () => document.querySelector('.timeline-shell__preview video') as HTMLVideoElement | null
 
   it('shows a safe fallback when the editor service cannot load', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Project demo-openclip-project not found yet; showing demo shell fallback.')))
@@ -122,10 +130,13 @@ describe('OpenClip editor shell', () => {
     expect(await screen.findByRole('heading', { name: 'Loaded Clip' })).toBeInTheDocument()
     expect(screen.getByText(zh('loadedManifestProjectStatus', { projectName: 'Manifest Project' }))).toBeInTheDocument()
     expect(screen.getByDisplayValue('Loaded subtitle')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('Second loaded line')).toBeInTheDocument()
+    expect(screen.getByText('00:00:00,000 → 00:00:02,500')).toBeInTheDocument()
     expect(screen.getByRole('article', { name: zh('postProcessedPreview') })).toBeInTheDocument()
     expect(screen.getByRole('article', { name: zh('horizontalCoverPreview') })).toBeInTheDocument()
     expect(screen.getByRole('article', { name: zh('verticalCoverPreview') })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: zh('openDiagnosticsDrawer') })).toBeInTheDocument()
+    await waitFor(() => expect(getTimelinePreviewVideo()?.currentTime).toBe(5))
     expect(document.querySelector('.shell[data-theme="dark"]')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: zh('switchToLightTheme') })).toBeInTheDocument()
   })
@@ -182,7 +193,7 @@ describe('OpenClip editor shell', () => {
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Loaded Clip' })
-    const subtitleField = screen.getByLabelText(zh('subtitleOverride'))
+    const subtitleField = screen.getByLabelText(zh('subtitleCueTextareaLabel', { index: 1 }))
 
     await user.clear(subtitleField)
     await user.type(subtitleField, 'Unsaved bilingual draft')
@@ -257,29 +268,32 @@ describe('OpenClip editor shell', () => {
     expect(playSpy).not.toHaveBeenCalled()
   })
 
-  it('shows dirty state and clears it after a successful manifest-backed save', async () => {
-    const user = userEvent.setup()
-    const fetchMock = vi.fn()
-    fetchMock
-      .mockResolvedValueOnce({ ok: true, json: async () => manifestProject })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...manifestProject, clips: [{ ...manifestProject.clips[0], subtitle_recipe: { override_text: 'New subtitle draft from the shell.' }, effective_subtitle_text: 'New subtitle draft from the shell.' }] }) })
-    vi.stubGlobal('fetch', fetchMock)
+  it('changing boundary controls updates the timeline preview immediately', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => manifestProject }))
 
     render(<App />)
+
     await screen.findByRole('heading', { name: 'Loaded Clip' })
+    fireEvent.change(screen.getByLabelText(zh('clipStart')), { target: { value: '6' } })
 
-    const subtitleField = screen.getByLabelText(zh('subtitleOverride'))
-    await user.clear(subtitleField)
-    await user.type(subtitleField, 'New subtitle draft from the shell.')
+    await waitFor(() => expect(getTimelinePreviewVideo()?.currentTime).toBe(6))
+    expect(screen.getByLabelText(zh('clipStart'))).toHaveValue('6')
+  })
 
-    expect(screen.getByText(zh('dirtyStateDetected'))).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: zh('queueRerender', { operation: zh('operationSubtitle') }) })).toBeEnabled()
+  it('resetting the clip draft realigns the timeline preview to the saved clip bounds', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => manifestProject }))
+    const user = userEvent.setup()
 
-    await user.click(screen.getByRole('button', { name: zh('saveDraftToManifest') }))
+    render(<App />)
 
-    await waitFor(() => expect(screen.getByText(zh('draftMatchesSavedManifest'))).toBeInTheDocument())
-    expect(screen.getByRole('button', { name: zh('queueRerender', { operation: zh('operationSubtitle') }) })).toBeDisabled()
+    await screen.findByRole('heading', { name: 'Loaded Clip' })
+    fireEvent.change(screen.getByLabelText(zh('clipStart')), { target: { value: '6' } })
+    await waitFor(() => expect(getTimelinePreviewVideo()?.currentTime).toBe(6))
+
+    await user.click(screen.getByRole('button', { name: zh('resetClipDraft') }))
+
+    await waitFor(() => expect(getTimelinePreviewVideo()?.currentTime).toBe(5))
+    expect(screen.getByLabelText(zh('clipStart'))).toHaveValue('5')
   })
 
   it('shows inline boundary rerender feedback while a boundary rerender is in progress', async () => {
@@ -328,13 +342,19 @@ describe('OpenClip editor shell', () => {
       .mockResolvedValueOnce({ ok: true, json: async () => manifestProject })
       .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'job-subtitle-1' }) })
-      .mockResolvedValue({ ok: true, json: async () => ({ status: 'running' }) })
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url === '/api/jobs/job-subtitle-1') {
+          return new Promise(() => {})
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`)
+      })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Loaded Clip' })
-    const subtitleField = screen.getByLabelText(zh('subtitleOverride'))
+    const subtitleField = screen.getByLabelText(zh('subtitleCueTextareaLabel', { index: 1 }))
     await user.clear(subtitleField)
     await user.type(subtitleField, 'Queued subtitle change.')
     await user.click(screen.getByRole('button', { name: zh('queueRerender', { operation: zh('operationSubtitle') }) }))
@@ -346,13 +366,47 @@ describe('OpenClip editor shell', () => {
     expect(screen.queryByText(zh('coverRerenderStarted'))).toBeNull()
   })
 
-  it('waits for project reconciliation after a completed boundary job before clearing the in-progress UI', async () => {
+  it('does not show a stale subtitle warning when boundaries move before rerender', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => manifestProject }))
+
+    render(<App />)
+
+    await screen.findByRole('heading', { name: 'Loaded Clip' })
+    const startSlider = screen.getByLabelText(zh('clipStart'))
+    fireEvent.change(startSlider, { target: { value: '6' } })
+
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: /重新生成/ })).toBeNull()
+  })
+
+  it('reloads regenerated subtitle cues immediately after queueing a boundary rerender', async () => {
     const user = userEvent.setup()
     const fetchMock = vi.fn()
     fetchMock
       .mockResolvedValueOnce({ ok: true, json: async () => manifestProject })
       .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'job-boundary-2' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ job_id: 'job-boundary-refresh' }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ...manifestProject,
+          clips: [{
+            ...manifestProject.clips[0],
+            start_time: '00:00:06',
+            absolute_start_time: '00:00:06',
+            absolute_time_range: '00:00:06 - 00:00:20',
+            subtitle_segments: [
+              { start_time: '00:00:00,000', end_time: '00:00:01,200', text: 'Boundary-synced cue' },
+              { start_time: '00:00:01,200', end_time: '00:00:02,400', text: 'Follow-up synced cue' },
+            ],
+            effective_subtitle_text: 'Boundary-synced cue\nFollow-up synced cue',
+            subtitle_recipe: {},
+            has_manual_subtitle_override: false,
+            recovery: { pending_job_id: 'job-boundary-refresh', pending_operation: 'boundary' },
+          }],
+        }),
+      })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'completed' }) })
       .mockResolvedValueOnce({
         ok: true,
@@ -360,18 +414,14 @@ describe('OpenClip editor shell', () => {
           ...manifestProject,
           clips: [{
             ...manifestProject.clips[0],
-            recovery: { pending_job_id: 'job-boundary-2', pending_operation: 'boundary' },
-          }],
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          ...manifestProject,
-          clips: [{
-            ...manifestProject.clips[0],
-            updated_at: '2026-04-20T00:02:00Z',
-            effective_subtitle_text: 'Reconciled subtitle text',
+            start_time: '00:00:06',
+            absolute_start_time: '00:00:06',
+            absolute_time_range: '00:00:06 - 00:00:20',
+            subtitle_segments: [
+              { start_time: '00:00:00,000', end_time: '00:00:01,200', text: 'Boundary-synced cue' },
+              { start_time: '00:00:01,200', end_time: '00:00:02,400', text: 'Follow-up synced cue' },
+            ],
+            effective_subtitle_text: 'Boundary-synced cue\nFollow-up synced cue',
             subtitle_recipe: {},
             has_manual_subtitle_override: false,
             recovery: {},
@@ -383,37 +433,86 @@ describe('OpenClip editor shell', () => {
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Loaded Clip' })
+    const subtitleField = screen.getByLabelText(zh('subtitleCueTextareaLabel', { index: 1 }))
+    await user.clear(subtitleField)
+    await user.type(subtitleField, 'Manual override before confirming boundary')
+    fireEvent.change(screen.getByLabelText(zh('clipStart')), { target: { value: '6' } })
+    await user.click(screen.getByRole('button', { name: zh('queueRerender', { operation: zh('operationBoundary') }) }))
+
+    await waitFor(() => expect(screen.getByDisplayValue('Boundary-synced cue')).toBeInTheDocument())
+    expect(screen.getByDisplayValue('Follow-up synced cue')).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('Manual override before confirming boundary')).toBeNull()
+    await waitFor(() => expect(getTimelinePreviewVideo()?.currentTime).toBe(6))
+  })
+
+  it('waits for project reconciliation after a completed boundary job before clearing the in-progress UI', async () => {
+    const user = userEvent.setup()
+    let projectLoadCount = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/projects/' && (!init?.method || init.method === 'GET')) {
+        projectLoadCount += 1
+        if (projectLoadCount === 1) {
+          return { ok: true, json: async () => manifestProject }
+        }
+        if (projectLoadCount === 2) {
+          return {
+            ok: true,
+            json: async () => ({
+              ...manifestProject,
+              clips: [{
+                ...manifestProject.clips[0],
+                subtitle_segments: [{ start_time: '00:00:00,000', end_time: '00:00:03,000', text: 'Boundary-synced subtitle text' }],
+                effective_subtitle_text: 'Boundary-synced subtitle text',
+                subtitle_recipe: {},
+                has_manual_subtitle_override: false,
+                recovery: { pending_job_id: 'job-boundary-2', pending_operation: 'boundary' },
+              }],
+            }),
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            ...manifestProject,
+            clips: [{
+              ...manifestProject.clips[0],
+              updated_at: '2026-04-20T00:02:00Z',
+              subtitle_segments: [{ start_time: '00:00:00,000', end_time: '00:00:03,000', text: 'Reconciled subtitle text' }],
+              effective_subtitle_text: 'Reconciled subtitle text',
+              subtitle_recipe: {},
+              has_manual_subtitle_override: false,
+              recovery: {},
+            }],
+          }),
+        }
+      }
+      if (url.endsWith('/clips/clip-real-1/bounds')) {
+        return { ok: true, json: async () => ({}) }
+      }
+      if (url.endsWith('/clips/clip-real-1/rerender/boundary')) {
+        return { ok: true, json: async () => ({ job_id: 'job-boundary-2' }) }
+      }
+      if (url === '/api/jobs/job-boundary-2') {
+        return { ok: true, json: async () => ({ status: 'completed' }) }
+      }
+      throw new Error(`Unexpected fetch in test: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    await screen.findByRole('heading', { name: 'Loaded Clip' })
     const startSlider = screen.getByLabelText(zh('clipStart'))
     fireEvent.change(startSlider, { target: { value: '6' } })
     await user.click(screen.getByRole('button', { name: zh('queueRerender', { operation: zh('operationBoundary') }) }))
 
-    await screen.findByRole('button', { name: zh('rerenderInProgress', { operation: zh('operationBoundary') }) })
     await waitFor(() => expect(screen.getByDisplayValue('Reconciled subtitle text')).toBeInTheDocument())
     const previewPanel = screen.getByRole('article', { name: zh('postProcessedPreview') })
     const previewVideo = previewPanel.querySelector('video')
     expect(previewVideo).toHaveAttribute('src', '/api/projects/proj-real/media/clips_post_processed/clip-real-1.mp4?v=2026-04-20T00%3A02%3A00Z')
     expect(screen.getByRole('button', { name: zh('queueRerender', { operation: zh('operationBoundary') }) })).toBeDisabled()
     expect(screen.queryByText(zh('boundaryRerenderStarted'))).toBeNull()
-  })
-
-  it('shows a stale subtitle warning and regenerate action when the manifest marks subtitles stale', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        ...manifestProject,
-        clips: [{
-          ...manifestProject.clips[0],
-          metadata: { subtitle_stale: true },
-          has_manual_subtitle_override: true,
-        }],
-      }),
-    }))
-
-    render(<App />)
-
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
-    expect(screen.getByText(zh('subtitleOverrideIsStale'))).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: zh('replaceWithRegeneratedSubtitleText') })).toBeInTheDocument()
   })
 
   it('shows a clear empty state when no post-processed clip is available', async () => {
@@ -443,8 +542,8 @@ describe('OpenClip editor shell', () => {
     render(<App />)
 
     await screen.findByRole('heading', { name: 'Loaded Clip' })
-    expect(screen.getByAltText(zh('horizontalCoverAlt', { title: 'Loaded cover' }))).toHaveAttribute('src', '/api/projects/proj-real/media/covers/cover-clip-real-1-horizontal.jpg')
-    expect(screen.getByAltText(zh('verticalCoverAlt', { title: 'Loaded cover' }))).toHaveAttribute('src', '/api/projects/proj-real/media/covers/cover-clip-real-1-vertical.jpg')
+    expect(screen.getByAltText(zh('horizontalCoverAlt', { title: 'Loaded cover' }))).toHaveAttribute('src', '/api/projects/proj-real/media/covers/cover-clip-real-1-horizontal.jpg?v=2026-04-20T00%3A00%3A00Z')
+    expect(screen.getByAltText(zh('verticalCoverAlt', { title: 'Loaded cover' }))).toHaveAttribute('src', '/api/projects/proj-real/media/covers/cover-clip-real-1-vertical.jpg?v=2026-04-20T00%3A00%3A00Z')
   })
 
   it('shows clear empty states when cover assets are unavailable', async () => {

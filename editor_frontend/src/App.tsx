@@ -10,6 +10,9 @@ import {
   projectFromManifest,
   type ClipDraft,
   type EditorProject,
+  type SubtitleSegmentDraft,
+  serializeSubtitleSegments,
+  subtitleSegmentsToText,
 } from './editorState'
 import { t, type Locale, type MessageKey } from './i18n'
 
@@ -17,7 +20,6 @@ const editorEndpoints = [
   'GET /api/projects/:project_id',
   'PATCH /api/projects/:project_id/clips/:clip_id/bounds',
   'PATCH /api/projects/:project_id/clips/:clip_id/subtitle',
-  'POST /api/projects/:project_id/clips/:clip_id/subtitle/regenerate',
   'PATCH /api/projects/:project_id/clips/:clip_id/cover-title',
   'POST /api/projects/:project_id/clips/:clip_id/rerender/boundary',
   'POST /api/projects/:project_id/clips/:clip_id/rerender/subtitles',
@@ -96,6 +98,17 @@ function rawMessage(text: string): UiText {
   return { raw: text }
 }
 
+function buildPreviewWindow(clip?: ClipDraft, projectSourceVideoUrl?: string): PreviewWindow | null {
+  if (!clip) {
+    return null
+  }
+  return {
+    start: clip.start,
+    end: clip.end,
+    sourceVideoUrl: clip.sourceVideoUrl ?? projectSourceVideoUrl,
+  }
+}
+
 function App() {
   const projectId = useMemo(() => getProjectIdFromPath(window.location.pathname), [])
   const [savedProject, setSavedProject] = useState<EditorProject>(() => emptyProject(projectId))
@@ -114,11 +127,14 @@ function App() {
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const subtitlePreviewVideoRef = useRef<HTMLVideoElement | null>(null)
+  const activeClipIdRef = useRef('')
 
   const savedClipMap = useMemo(() => new Map(savedProject.clips.map((clip) => [clip.id, clip])), [savedProject.clips])
   const activeClip = draftProject.clips.find((clip) => clip.id === activeClipId) ?? draftProject.clips[0]
   const savedActiveClip = savedClipMap.get(activeClip?.id ?? '') ?? activeClip
   const subtitlePreviewUrl = withVersionToken(activeClip?.currentComposedClipUrl, activeClip?.updatedAt)
+  const horizontalCoverPreviewUrl = withVersionToken(activeClip?.horizontalCoverUrl, activeClip?.updatedAt)
+  const verticalCoverPreviewUrl = withVersionToken(activeClip?.verticalCoverUrl, activeClip?.updatedAt)
   const activeDirtyState = activeClip && savedActiveClip ? getDirtyState(savedActiveClip, activeClip) : emptyDirtyState
   const activePartStart = activeClip?.partAbsoluteStart ?? 0
   const activePartEnd = activeClip?.partAbsoluteEnd ?? draftProject.totalDuration
@@ -136,16 +152,11 @@ function App() {
   }, [])
 
   const applyLoadedProject = useCallback((result: LoadedProjectResult) => {
+    const targetClip = result.project.clips.find((clip) => clip.id === activeClipIdRef.current) ?? result.project.clips[0]
     setSavedProject(result.project)
     setDraftProject(result.project)
-    setActiveClipId((current) => current || result.project.clips[0]?.id || '')
-    setPreviewWindow((current) => current ?? (result.project.clips[0]
-      ? {
-          start: result.project.clips[0].start,
-          end: result.project.clips[0].end,
-          sourceVideoUrl: result.project.clips[0].sourceVideoUrl ?? result.project.sourceVideoUrl,
-        }
-      : null))
+    setActiveClipId(targetClip?.id ?? '')
+    setPreviewWindow(buildPreviewWindow(targetClip, result.project.sourceVideoUrl))
     setStatusMessage(result.statusMessage)
     setLoadError(null)
     pushLog(result.logMessage)
@@ -215,6 +226,10 @@ function App() {
   }, [locale])
 
   useEffect(() => {
+    activeClipIdRef.current = activeClipId
+  }, [activeClipId])
+
+  useEffect(() => {
     if (!dragHandle || !activeClip || !timelineTrackRef.current) {
       return undefined
     }
@@ -254,6 +269,19 @@ function App() {
       window.removeEventListener('pointerup', handlePointerUp)
     }
   }, [activeClip, dragHandle, draftProject.totalDuration, draftProject.sourceVideoUrl])
+
+  useEffect(() => {
+    if (dragHandle) {
+      return
+    }
+    const nextPreviewWindow = buildPreviewWindow(activeClip, draftProject.sourceVideoUrl)
+    const isSynced = previewWindow?.start === nextPreviewWindow?.start
+      && previewWindow?.end === nextPreviewWindow?.end
+      && previewWindow?.sourceVideoUrl === nextPreviewWindow?.sourceVideoUrl
+    if (!isSynced) {
+      setPreviewWindow(nextPreviewWindow)
+    }
+  }, [activeClip, dragHandle, draftProject.sourceVideoUrl, previewWindow])
 
   useEffect(() => {
     if (!previewVideoRef.current || !previewWindow) {
@@ -386,7 +414,6 @@ function App() {
       start: clamped.start,
       end: clamped.end,
       coverDirty: true,
-      subtitleStale: Boolean(clip.hasManualSubtitleOverride || clip.subtitleStale || clip.subtitleText !== (savedClipMap.get(clip.id)?.subtitleText ?? clip.subtitleText)),
     }))
     setPreviewWindow({
       start: clamped.start,
@@ -410,11 +437,18 @@ function App() {
       })
       await assertOk(response, 'Saving clip bounds')
     }
-    if (savedClip.subtitleText !== clip.subtitleText) {
+    if (serializeSubtitleSegments(savedClip.subtitleSegments) !== serializeSubtitleSegments(clip.subtitleSegments)) {
       const response = await fetch(`/api/projects/${projectId}/clips/${clip.id}/subtitle`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subtitle_text: clip.subtitleText }),
+        body: JSON.stringify({
+          subtitle_text: clip.subtitleText,
+          subtitle_segments: clip.subtitleSegments.map((segment) => ({
+            start_time: segment.startTime,
+            end_time: segment.endTime,
+            text: segment.text,
+          })),
+        }),
       })
       await assertOk(response, 'Saving subtitle override')
     }
@@ -440,19 +474,6 @@ function App() {
       await new Promise((resolve) => setTimeout(resolve, reconciliationPollIntervalMs))
     }
     return latestResult ?? loadProject()
-  }
-
-  async function handleSaveDraft() {
-    if (!activeClip) return
-    try {
-      await patchClip(activeClip)
-      pushLog(message('savedEditorDraftLog', { title: activeClip.title }))
-      applyLoadedProject(await loadProject())
-    } catch (error) {
-      const nextMessage = error instanceof Error ? error.message : t(locale, 'savingDraftFailed')
-      setStatusMessage(rawMessage(nextMessage))
-      pushLog(rawMessage(nextMessage))
-    }
   }
 
   function handleResetClip() {
@@ -514,15 +535,21 @@ function App() {
       const response = await fetch(`/api/projects/${projectId}/clips/${activeClip.id}/rerender/${action}`, { method: 'POST' })
       await assertOk(response, t(locale, 'queueRerender', { operation: getOperationLabel(action) }))
       const payload = await response.json()
-      setStatusMessage(message('queuedRerenderStatus', { operation: getOperationLabel(action), title: activeClip.title }))
+      const queuedStatus = message('queuedRerenderStatus', { operation: getOperationLabel(action), title: activeClip.title })
+      setStatusMessage(queuedStatus)
       pushLog(message('queuedRerenderLog', { operation: getOperationLabel(action), jobId: payload.job_id }))
-      updateClip(activeClip.id, (clip) => ({
-        ...clip,
-        renderStatus: 'Rendering',
-        pendingJobId: payload.job_id,
-        pendingOperation: action,
-        lastError: undefined,
-      }))
+      if (action === 'boundary') {
+        applyLoadedProject(await loadProject())
+        setStatusMessage(queuedStatus)
+      } else {
+        updateClip(activeClip.id, (clip) => ({
+          ...clip,
+          renderStatus: 'Rendering',
+          pendingJobId: payload.job_id,
+          pendingOperation: action,
+          lastError: undefined,
+        }))
+      }
       void pollJob(payload.job_id, activeClip.id)
     } catch (error) {
       const nextMessage = error instanceof Error ? error.message : t(locale, 'unableQueueRerender', { operation: getOperationLabel(action) })
@@ -548,27 +575,6 @@ function App() {
       void pollJob(payload.job_id, activeClip.id)
     } catch (error) {
       const nextMessage = error instanceof Error ? error.message : t(locale, 'unableResumeRerender')
-      setStatusMessage(rawMessage(nextMessage))
-      pushLog(rawMessage(nextMessage))
-    }
-  }
-
-  async function handleRegenerateSubtitleText() {
-    if (!activeClip) return
-    try {
-      const response = await fetch(`/api/projects/${projectId}/clips/${activeClip.id}/subtitle/regenerate`, { method: 'POST' })
-      await assertOk(response, t(locale, 'regeneratingSubtitleText'))
-      const payload = await response.json()
-      updateClip(activeClip.id, (clip) => ({
-        ...clip,
-        subtitleText: payload.effective_subtitle_text ?? '',
-        subtitleStale: false,
-        hasManualSubtitleOverride: true,
-      }))
-      pushLog(message('replacedSubtitleOverrideLog', { title: activeClip.title }))
-      await applyLoadedProject(await loadProject())
-    } catch (error) {
-      const nextMessage = error instanceof Error ? error.message : t(locale, 'regeneratingSubtitleTextFailed')
       setStatusMessage(rawMessage(nextMessage))
       pushLog(rawMessage(nextMessage))
     }
@@ -619,6 +625,11 @@ function App() {
   const diagnosticsStatusKind = loading ? 'loading' : loadError ? 'error' : 'connected'
   const diagnosticsStatus = loading ? t(locale, 'loadingStatus') : loadError ? t(locale, 'errorStatus') : t(locale, 'connectedStatus')
   const activePendingOperation = activeClip.pendingOperation as 'boundary' | 'subtitles' | 'cover' | undefined
+  const shouldShowStatusBanner = loading
+    || activeClip.renderStatus === 'Recoverable'
+    || activeClip.renderStatus === 'Error'
+    || activeDirtyState.hasChanges
+    || activeDirtyState.coverNeedsRefresh
   const boundaryRerenderMessage = activePendingOperation === 'boundary' && activeClip.renderStatus === 'Rendering'
     ? t(locale, 'boundaryRerenderStarted')
     : null
@@ -628,6 +639,23 @@ function App() {
   const coverRerenderMessage = activePendingOperation === 'cover' && activeClip.renderStatus === 'Rendering'
     ? t(locale, 'coverRerenderStarted')
     : null
+  const subtitleCueTextareaLabel = (index: number) => t(locale, 'subtitleCueTextareaLabel', { index })
+
+  function updateSubtitleSegmentText(index: number, text: string) {
+    if (!activeClip) return
+    updateClip(activeClip.id, (clip) => {
+      const subtitleSegments = clip.subtitleSegments.map((segment) => (
+        segment.index === index
+          ? { ...segment, text }
+          : segment
+      ))
+      return {
+        ...clip,
+        subtitleSegments,
+        subtitleText: subtitleSegmentsToText(subtitleSegments),
+      }
+    })
+  }
 
   function getQueueButtonLabel(action: 'boundary' | 'subtitles' | 'cover'): string {
     if (activePendingOperation === action) {
@@ -712,28 +740,28 @@ function App() {
               <h2>{activeClip.title}</h2>
               <p className="muted">{activeClip.sourcePart || t(locale, 'singleSource')} · {t(locale, 'localLabel')} {activeClip.localTimeRange} · {t(locale, 'lastUpdate')} {activeClip.updatedAt}</p>
             </div>
-            <div className="dirty-banner" data-state={activeDirtyState.hasChanges || activeDirtyState.coverNeedsRefresh ? 'dirty' : 'clean'}>
-              <strong>
-                {loading
-                  ? t(locale, 'loadingProject')
-                  : activeClip.renderStatus === 'Recoverable'
-                    ? t(locale, 'recoverableRerenderDetected')
-                    : activeClip.renderStatus === 'Error'
-                      ? t(locale, 'editorActionFailed')
+            {shouldShowStatusBanner ? (
+              <div className="dirty-banner" data-state={activeDirtyState.hasChanges || activeDirtyState.coverNeedsRefresh ? 'dirty' : 'clean'}>
+                <strong>
+                  {loading
+                    ? t(locale, 'loadingProject')
+                    : activeClip.renderStatus === 'Recoverable'
+                      ? t(locale, 'recoverableRerenderDetected')
+                      : activeClip.renderStatus === 'Error'
+                        ? t(locale, 'editorActionFailed')
+                        : t(locale, 'dirtyStateDetected')}
+                </strong>
+                <span>
+                  {activeClip.lastError
+                    ? activeClip.lastError
+                    : activeClip.renderStatus === 'Recoverable'
+                      ? t(locale, 'resumeInterruptedHint')
                       : activeDirtyState.hasChanges || activeDirtyState.coverNeedsRefresh
-                        ? t(locale, 'dirtyStateDetected')
-                        : t(locale, 'draftMatchesSavedManifest')}
-              </strong>
-              <span>
-                {activeClip.lastError
-                  ? activeClip.lastError
-                  : activeClip.renderStatus === 'Recoverable'
-                    ? t(locale, 'resumeInterruptedHint')
-                    : activeDirtyState.hasChanges || activeDirtyState.coverNeedsRefresh
-                      ? t(locale, 'saveDraftThenQueueHint')
-                      : t(locale, 'useEditorPreviewHint')}
-              </span>
-            </div>
+                        ? t(locale, 'queueSpecificRerenderHint')
+                        : ''}
+                </span>
+              </div>
+            ) : null}
           </div>
 
           <section className="editor-section">
@@ -797,20 +825,27 @@ function App() {
             </div>
             <div className="subtitle-editor-layout">
               <article className="subtitle-editor-layout__controls">
-                <label className="field"><span>{t(locale, 'subtitleOverride')}</span><textarea aria-label={t(locale, 'subtitleOverride')} value={activeClip.subtitleText} disabled={loading} onChange={(event) => {
-                  const { value } = event.currentTarget
-                  updateClip(activeClip.id, (clip) => ({ ...clip, subtitleText: value, subtitleStale: false, hasManualSubtitleOverride: true }))
-                }} rows={6} /></label>
-                {activeClip.subtitleStale ? (
-                  <div className="subtitle-warning" role="alert">
-                    <strong>{t(locale, 'subtitleOverrideIsStale')}</strong>
-                    <p>{t(locale, 'subtitleOverrideStaleReason')}</p>
-                    <p>{t(locale, 'subtitleOverrideReplaceWarning')}</p>
-                    <button type="button" className="action-button action-button--secondary" disabled={loading} onClick={() => void handleRegenerateSubtitleText()}>
-                      {t(locale, 'replaceWithRegeneratedSubtitleText')}
-                    </button>
+                <div className="field">
+                  <span>{t(locale, 'subtitleOverride')}</span>
+                  <div className="subtitle-segment-list" aria-label={t(locale, 'subtitleOverride')}>
+                    {activeClip.subtitleSegments.length > 0 ? activeClip.subtitleSegments.map((segment: SubtitleSegmentDraft) => (
+                      <div key={`${segment.index}-${segment.startTime}-${segment.endTime}`} className="subtitle-segment-card">
+                        <div className="subtitle-segment-card__row">
+                          <textarea
+                            aria-label={subtitleCueTextareaLabel(segment.index)}
+                            value={segment.text}
+                            disabled={loading}
+                            onChange={(event) => updateSubtitleSegmentText(segment.index, event.currentTarget.value)}
+                            rows={Math.max(1, Math.min(3, segment.text.split('\n').length || 1))}
+                          />
+                          <code className="subtitle-segment-card__time">{segment.startTime} → {segment.endTime}</code>
+                        </div>
+                      </div>
+                    )) : (
+                      <p className="muted">{t(locale, 'noSubtitleSegmentsAvailable')}</p>
+                    )}
                   </div>
-                ) : null}
+                </div>
                 <button type="button" className="action-button action-button--secondary" disabled={loading || !activeDirtyState.subtitlesDirty || Boolean(subtitleRerenderMessage)} onClick={() => void handleQueue('subtitles')}>{getQueueButtonLabel('subtitles')}</button>
                 {subtitleRerenderMessage ? <p className="rerender-status">{subtitleRerenderMessage}</p> : null}
               </article>
@@ -843,8 +878,8 @@ function App() {
             <div className="cover-preview">
               <article className="cover-preview-card cover-preview-card--horizontal" aria-label={t(locale, 'horizontalCoverPreview')}>
                 <div className="cover-preview-card__header"><span>{t(locale, 'horizontal')}</span></div>
-                {activeClip.horizontalCoverUrl ? (
-                  <img src={activeClip.horizontalCoverUrl} alt={t(locale, 'horizontalCoverAlt', { title: activeClip.coverTitle })} className="cover-preview-card__image cover-preview-card__image--horizontal" />
+                {horizontalCoverPreviewUrl ? (
+                  <img src={horizontalCoverPreviewUrl} alt={t(locale, 'horizontalCoverAlt', { title: activeClip.coverTitle })} className="cover-preview-card__image cover-preview-card__image--horizontal" />
                 ) : (
                   <div className="cover-preview-card__empty">
                     <strong>{t(locale, 'horizontalCoverUnavailable')}</strong>
@@ -855,8 +890,8 @@ function App() {
               </article>
               <article className="cover-preview-card cover-preview-card--vertical" aria-label={t(locale, 'verticalCoverPreview')}>
                 <div className="cover-preview-card__header"><span>{t(locale, 'vertical')}</span></div>
-                {activeClip.verticalCoverUrl ? (
-                  <img src={activeClip.verticalCoverUrl} alt={t(locale, 'verticalCoverAlt', { title: activeClip.coverTitle })} className="cover-preview-card__image cover-preview-card__image--vertical" />
+                {verticalCoverPreviewUrl ? (
+                  <img src={verticalCoverPreviewUrl} alt={t(locale, 'verticalCoverAlt', { title: activeClip.coverTitle })} className="cover-preview-card__image cover-preview-card__image--vertical" />
                 ) : (
                   <div className="cover-preview-card__empty">
                     <strong>{t(locale, 'verticalCoverUnavailable')}</strong>
@@ -871,7 +906,6 @@ function App() {
           </section>
 
           <footer className="editor-actions">
-            <button type="button" className="action-button" disabled={loading} onClick={() => void handleSaveDraft()}>{t(locale, 'saveDraftToManifest')}</button>
             <button type="button" className="action-button action-button--secondary" disabled={loading} onClick={handleResetClip}>{t(locale, 'resetClipDraft')}</button>
           </footer>
         </section>

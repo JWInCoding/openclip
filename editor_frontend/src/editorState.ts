@@ -12,6 +12,7 @@ export interface ClipDraft {
   partAbsoluteStart?: number
   partAbsoluteEnd?: number
   subtitleText: string
+  subtitleSegments: SubtitleSegmentDraft[]
   coverTitle: string
   renderStatus: 'Ready' | 'Needs sync' | 'Rendering' | 'Recoverable' | 'Error'
   updatedAt: string
@@ -29,8 +30,6 @@ export interface ClipDraft {
   lastError?: string
   pendingJobId?: string
   pendingOperation?: string
-  subtitleStale?: boolean
-  hasManualSubtitleOverride?: boolean
 }
 
 export interface EditorProject {
@@ -48,6 +47,13 @@ export interface DirtyState {
   subtitlesDirty: boolean
   coverTitleDirty: boolean
   coverNeedsRefresh: boolean
+}
+
+export interface SubtitleSegmentDraft {
+  index: number
+  startTime: string
+  endTime: string
+  text: string
 }
 
 interface ManifestAssetRegistry {
@@ -71,9 +77,14 @@ interface ManifestClipRecipe {
   text?: string
 }
 
+interface ManifestSubtitleSegment {
+  start_time?: string
+  end_time?: string
+  text?: string
+}
+
 interface ManifestClipMetadata {
   cover_dirty?: boolean
-  subtitle_stale?: boolean
 }
 
 interface ManifestClip {
@@ -87,6 +98,7 @@ interface ManifestClip {
   absolute_end_time?: string
   absolute_time_range?: string
   subtitle_recipe?: ManifestClipRecipe
+  subtitle_segments?: ManifestSubtitleSegment[]
   effective_subtitle_text?: string
   has_manual_subtitle_override?: boolean
   cover_recipe?: ManifestClipRecipe
@@ -199,7 +211,7 @@ export function clampBoundsWithinRange(
 
 export function getDirtyState(savedClip: ClipDraft, draftClip: ClipDraft): DirtyState {
   const boundsDirty = savedClip.start !== draftClip.start || savedClip.end !== draftClip.end
-  const subtitlesDirty = savedClip.subtitleText !== draftClip.subtitleText
+  const subtitlesDirty = serializeSubtitleSegments(savedClip.subtitleSegments) !== serializeSubtitleSegments(draftClip.subtitleSegments)
   const coverTitleDirty = savedClip.coverTitle !== draftClip.coverTitle
   return {
     hasChanges: boundsDirty || subtitlesDirty || coverTitleDirty,
@@ -208,6 +220,33 @@ export function getDirtyState(savedClip: ClipDraft, draftClip: ClipDraft): Dirty
     coverTitleDirty,
     coverNeedsRefresh: Boolean(draftClip.coverDirty) || boundsDirty || coverTitleDirty,
   }
+}
+
+export function subtitleSegmentsToText(segments: SubtitleSegmentDraft[]): string {
+  return segments
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+}
+
+export function serializeSubtitleSegments(segments: SubtitleSegmentDraft[]): string {
+  return JSON.stringify(
+    segments.map((segment) => ({
+      startTime: segment.startTime,
+      endTime: segment.endTime,
+      text: segment.text,
+    })),
+  )
+}
+
+function mapSubtitleSegments(segments?: ManifestSubtitleSegment[]): SubtitleSegmentDraft[] {
+  return (segments ?? []).map((segment, index) => ({
+    index: index + 1,
+    startTime: segment.start_time ?? '00:00:00,000',
+    endTime: segment.end_time ?? '00:00:00,500',
+    text: segment.text ?? '',
+  }))
 }
 
 export function summarizeDirtyState(state: DirtyState): string {
@@ -249,6 +288,8 @@ export function projectFromManifest(manifest: EditorManifest): EditorProject {
     totalDuration: Number(manifest.source_video_duration ?? 0),
     clips: (manifest.clips ?? []).map((clip, index) => {
       const coverDirty = Boolean(clip.metadata?.cover_dirty)
+      const subtitleSegments = mapSubtitleSegments(clip.subtitle_segments)
+      const subtitleText = subtitleSegmentsToText(subtitleSegments) || (clip.effective_subtitle_text ?? clip.subtitle_recipe?.override_text ?? '')
       return {
         id: clip.clip_id,
         order: index + 1,
@@ -264,7 +305,8 @@ export function projectFromManifest(manifest: EditorManifest): EditorProject {
         partAbsoluteEnd: clip.part_duration_seconds !== undefined && clip.part_duration_seconds !== null
           ? Number(clip.part_offset_seconds ?? 0) + Number(clip.part_duration_seconds)
           : undefined,
-        subtitleText: clip.effective_subtitle_text ?? clip.subtitle_recipe?.override_text ?? '',
+        subtitleText,
+        subtitleSegments,
         coverTitle: clip.cover_recipe?.text ?? clip.title,
         renderStatus: mapRenderStatus(clip.recovery, coverDirty),
         updatedAt: clip.updated_at ?? clip.recovery?.last_reconciled_at ?? manifest.updated_at ?? 'pending manifest sync',
@@ -278,8 +320,6 @@ export function projectFromManifest(manifest: EditorManifest): EditorProject {
         verticalCover: clip.asset_registry?.vertical_cover,
         verticalCoverUrl: clip.vertical_cover_url,
         coverDirty,
-        subtitleStale: Boolean(clip.metadata?.subtitle_stale),
-        hasManualSubtitleOverride: Boolean(clip.has_manual_subtitle_override),
         recoveryState: clip.recovery?.recovery_state,
         lastError: clip.recovery?.last_error,
         pendingJobId: clip.recovery?.pending_job_id,
