@@ -21,7 +21,7 @@ from core.editor.manifest import (
     reconcile_manifest,
     save_manifest,
 )
-from core.editor.models import EditorClip, EditorManifest, utc_now_iso
+from core.editor.models import EditorClip, EditorManifest, SubtitleSegment, utc_now_iso
 from core.subtitle_burner import SubtitleBurner, SubtitleStyleConfig
 from core.title_adder import TitleAdder
 from job_manager import JobManager
@@ -48,31 +48,150 @@ def _read_effective_subtitle_text(path: str | None) -> str:
     return '\n'.join(lines).strip()
 
 
-def _derive_subtitle_text_for_bounds(clip: EditorClip) -> str:
+def _subtitle_segments_to_text(segments: list[dict[str, str]]) -> str:
+    lines = [str(segment.get("text", "")).strip() for segment in segments]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _serialize_subtitle_segments(segments: list[Any]) -> list[dict[str, str]]:
+    serialized: list[dict[str, str]] = []
+    for index, segment in enumerate(segments, start=1):
+        if hasattr(segment, "to_dict"):
+            item = segment.to_dict()
+        else:
+            item = dict(segment or {})
+        serialized.append(
+            {
+                "index": index,
+                "start_time": str(item.get("start_time", "00:00:00,000")),
+                "end_time": str(item.get("end_time", "00:00:00,500")),
+                "text": str(item.get("text", "")),
+            }
+        )
+    return serialized
+
+
+def _write_subtitle_segments(path: Path, segments: list[dict[str, str]]) -> None:
+    blocks = []
+    for index, segment in enumerate(segments, start=1):
+        blocks.append(
+            "\n".join(
+                [
+                    str(index),
+                    f"{segment['start_time']} --> {segment['end_time']}",
+                    segment["text"],
+                ]
+            )
+        )
+    path.write_text("\n\n".join(blocks).strip() + "\n", encoding="utf-8")
+
+
+def _legacy_override_segments_for_clip(clip: EditorClip) -> list[dict[str, str]]:
+    if not (clip.subtitle_recipe.override_text or "").strip():
+        return []
+    override_lines = [line.strip() for line in (clip.subtitle_recipe.override_text or "").splitlines() if line.strip()]
+    timed_segments = _derive_subtitle_segments_for_bounds(clip)
+    if timed_segments:
+        remapped_segments: list[dict[str, str]] = []
+        for index, segment in enumerate(timed_segments, start=1):
+            if index - 1 < len(override_lines):
+                text = override_lines[index - 1]
+            else:
+                text = segment["text"]
+            remapped_segments.append(
+                {
+                    "index": index,
+                    "start_time": segment["start_time"],
+                    "end_time": segment["end_time"],
+                    "text": text,
+                }
+            )
+        if len(override_lines) > len(remapped_segments):
+            overflow = "\n".join(override_lines[len(remapped_segments):]).strip()
+            if overflow:
+                last_segment = remapped_segments[-1]
+                last_segment["text"] = f"{last_segment['text']}\n{overflow}".strip()
+        return remapped_segments
+
+    clip_duration = max(parse_timecode_to_seconds(clip.end_time) - parse_timecode_to_seconds(clip.start_time), 0.5)
+    return [
+        {
+            "index": 1,
+            "start_time": "00:00:00,000",
+            "end_time": format_seconds_as_timecode(clip_duration).replace(".", ","),
+            "text": clip.subtitle_recipe.override_text or "",
+        }
+    ]
+
+
+def _parse_subtitle_segments_from_path(path: str | None) -> list[dict[str, str]]:
+    if not path:
+        return []
+    subtitle_path = Path(path)
+    if not subtitle_path.exists():
+        return []
+    try:
+        generator = ClipGenerator(output_dir=str(subtitle_path.parent))
+        return [
+            {
+                "index": index,
+                "start_time": str(segment.get("start_time", "00:00:00,000")),
+                "end_time": str(segment.get("end_time", "00:00:00,500")),
+                "text": str(segment.get("text", "")),
+            }
+            for index, segment in enumerate(generator._parse_srt_file(str(subtitle_path)), start=1)
+        ]
+    except Exception:
+        return []
+
+
+def _derive_subtitle_segments_for_bounds(clip: EditorClip) -> list[dict[str, str]]:
     source_subtitle_path = clip.metadata.get("source_subtitle_path")
     if not source_subtitle_path:
-        return _read_effective_subtitle_text(clip.asset_registry.subtitle_active)
+        return _parse_subtitle_segments_from_path(clip.asset_registry.subtitle_active)
 
     subtitle_path = Path(source_subtitle_path)
     if not subtitle_path.exists():
-        return _read_effective_subtitle_text(clip.asset_registry.subtitle_active)
+        return _parse_subtitle_segments_from_path(clip.asset_registry.subtitle_active)
 
     try:
-        segments = ClipGenerator(output_dir=str(subtitle_path.parent))._parse_srt_file(str(subtitle_path))
+        generator = ClipGenerator(output_dir=str(subtitle_path.parent))
+        segments = generator._parse_srt_file(str(subtitle_path))
     except Exception:
-        return _read_effective_subtitle_text(clip.asset_registry.subtitle_active)
+        return _parse_subtitle_segments_from_path(clip.asset_registry.subtitle_active)
 
     clip_start = parse_timecode_to_seconds(clip.start_time)
     clip_end = parse_timecode_to_seconds(clip.end_time)
-    lines: list[str] = []
+    derived_segments: list[dict[str, str]] = []
     for segment in segments:
-        seg_start = parse_timecode_to_seconds(segment.get("start_time"))
-        seg_end = parse_timecode_to_seconds(segment.get("end_time"))
+        seg_start = generator._time_to_seconds_srt(str(segment.get("start_time")))
+        seg_end = generator._time_to_seconds_srt(str(segment.get("end_time")))
         if seg_end > clip_start and seg_start < clip_end:
-            text = str(segment.get("text", "")).strip()
-            if text:
-                lines.append(text)
-    return "\n".join(lines).strip()
+            new_start = max(0.0, seg_start - clip_start)
+            new_end = max(new_start + 0.1, seg_end - clip_start)
+            derived_segments.append(
+                {
+                    "index": len(derived_segments) + 1,
+                    "start_time": generator._seconds_to_time_srt(new_start),
+                    "end_time": generator._seconds_to_time_srt(new_end),
+                    "text": str(segment.get("text", "")),
+                }
+            )
+    return derived_segments
+
+
+def _effective_subtitle_segments_for_clip(clip: EditorClip) -> list[dict[str, str]]:
+    override_segments = _serialize_subtitle_segments(clip.subtitle_recipe.override_segments)
+    if override_segments:
+        return override_segments
+    legacy_override_segments = _legacy_override_segments_for_clip(clip)
+    if legacy_override_segments:
+        return legacy_override_segments
+    return _derive_subtitle_segments_for_bounds(clip)
+
+
+def _derive_subtitle_text_for_bounds(clip: EditorClip) -> str:
+    return _subtitle_segments_to_text(_effective_subtitle_segments_for_clip(clip))
 
 
 def _resolve_cover_color(value: Any, fallback_name: str) -> Any:
@@ -140,9 +259,11 @@ class EditorService:
 
     def _serialize_clip(self, clip: EditorClip) -> dict[str, Any]:
         payload = clip.to_dict()
+        subtitle_segments = _effective_subtitle_segments_for_clip(clip)
         payload["active_subtitle_path"] = clip.asset_registry.subtitle_active
-        payload["effective_subtitle_text"] = clip.subtitle_recipe.override_text or _derive_subtitle_text_for_bounds(clip)
-        payload["has_manual_subtitle_override"] = bool(clip.subtitle_recipe.override_text and clip.subtitle_recipe.override_text.strip())
+        payload["subtitle_segments"] = subtitle_segments
+        payload["effective_subtitle_text"] = _subtitle_segments_to_text(subtitle_segments)
+        payload["has_manual_subtitle_override"] = clip.subtitle_recipe.has_override
         payload["recovery_state"] = clip.recovery.recovery_state
         payload["last_error"] = clip.recovery.last_error
         payload["pending_job_id"] = clip.recovery.pending_job_id
@@ -215,33 +336,29 @@ class EditorService:
         clip.recovery.last_error = None
         clip.updated_at = utc_now_iso()
         clip.metadata["cover_dirty"] = True
-        if clip.subtitle_recipe.override_text and clip.subtitle_recipe.override_text.strip():
-            clip.metadata["subtitle_stale"] = True
         self._save_manifest(manifest, manifest_path)
         return self._serialize_clip(clip)
 
-    def update_clip_subtitles(self, project_id: str, clip_id: str, subtitle_text: str) -> dict[str, Any]:
+    def update_clip_subtitles(
+        self,
+        project_id: str,
+        clip_id: str,
+        subtitle_text: str = "",
+        subtitle_segments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         manifest, manifest_path = self._load_manifest(project_id)
         clip = manifest.clip_by_id(clip_id)
-        clip.subtitle_recipe.override_text = subtitle_text
+        normalized_segments = _serialize_subtitle_segments(subtitle_segments or [])
+        if normalized_segments:
+            clip.subtitle_recipe.override_segments = [SubtitleSegment.from_dict(segment) for segment in normalized_segments]
+            clip.subtitle_recipe.override_text = _subtitle_segments_to_text(normalized_segments)
+        else:
+            clip.subtitle_recipe.override_segments = []
+            clip.subtitle_recipe.override_text = subtitle_text
         clip.recovery.dirty = True
         clip.recovery.recovery_state = "dirty"
         clip.recovery.last_error = None
         clip.updated_at = utc_now_iso()
-        clip.metadata["subtitle_stale"] = False
-        self._save_manifest(manifest, manifest_path)
-        return self._serialize_clip(clip)
-
-    def regenerate_subtitle_text(self, project_id: str, clip_id: str) -> dict[str, Any]:
-        manifest, manifest_path = self._load_manifest(project_id)
-        clip = manifest.clip_by_id(clip_id)
-        regenerated_text = _derive_subtitle_text_for_bounds(clip)
-        clip.subtitle_recipe.override_text = regenerated_text
-        clip.recovery.dirty = True
-        clip.recovery.recovery_state = "dirty"
-        clip.recovery.last_error = None
-        clip.updated_at = utc_now_iso()
-        clip.metadata["subtitle_stale"] = False
         self._save_manifest(manifest, manifest_path)
         return self._serialize_clip(clip)
 
@@ -287,7 +404,13 @@ class EditorService:
             raise ValueError(f"Clip {clip_id} already has a pending rerender job")
         job_id = self.job_manager.create_job(
             manifest.source_video_path or clip.source_video_path or clip.asset_registry.raw_clip or "",
-            {"kind": "editor_rerender", "project_id": project_id, "clip_id": clip_id, "operation": operation},
+            {
+                "kind": "editor_rerender",
+                "project_id": project_id,
+                "projects_root": str(self.projects_root.resolve()),
+                "clip_id": clip_id,
+                "operation": operation,
+            },
         )
         clip.recovery.pending_job_id = job_id
         clip.recovery.pending_operation = operation
@@ -296,6 +419,9 @@ class EditorService:
         clip.recovery.dirty = True
         clip.recovery.last_error = None
         clip.recovery.recovery_state = "pending"
+        if operation == "boundary":
+            clip.subtitle_recipe.override_text = None
+            clip.subtitle_recipe.override_segments = []
         clip.updated_at = utc_now_iso()
         self._save_manifest(manifest, manifest_path)
         self.job_manager.start_job(job_id, lambda job, progress: worker(manifest_path, clip_id, job, progress))
@@ -327,7 +453,7 @@ class EditorService:
             subtitle_sidecars["active"] = subtitle_sidecars.get("whisper") or subtitle_sidecars.get("original")
         clip.asset_registry.raw_clip = str(raw_clip_path)
         clip.asset_registry.subtitle_sidecars = subtitle_sidecars
-        should_refresh_composed_clip = not (clip.subtitle_recipe.override_text or "").strip()
+        should_refresh_composed_clip = not clip.subtitle_recipe.has_override
         active_subtitle_path = Path(clip.asset_registry.subtitle_active or "")
         if should_refresh_composed_clip and active_subtitle_path.exists():
             progress_callback("Refreshing post-processed clip", 75)
@@ -372,15 +498,19 @@ class EditorService:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / raw_clip_path.name
         subtitle_path = Path(clip.asset_registry.subtitle_active or raw_clip_path.with_suffix('.srt'))
-        if clip.subtitle_recipe.override_text:
+        override_segments = _serialize_subtitle_segments(clip.subtitle_recipe.override_segments)
+        if override_segments:
             override_dir = Path(manifest.project_root) / "editor_overrides"
             override_dir.mkdir(parents=True, exist_ok=True)
             subtitle_path = override_dir / f"{clip.clip_id}.srt"
-            clip_duration = max(parse_timecode_to_seconds(clip.end_time) - parse_timecode_to_seconds(clip.start_time), 0.5)
-            subtitle_path.write_text(
-                f"1\n00:00:00,000 --> {format_seconds_as_timecode(clip_duration).replace('.', ',')}\n{clip.subtitle_recipe.override_text}\n",
-                encoding='utf-8',
-            )
+            _write_subtitle_segments(subtitle_path, override_segments)
+            clip.asset_registry.subtitle_sidecars["override"] = str(subtitle_path)
+            clip.asset_registry.subtitle_sidecars["active"] = str(subtitle_path)
+        elif clip.subtitle_recipe.override_text:
+            override_dir = Path(manifest.project_root) / "editor_overrides"
+            override_dir.mkdir(parents=True, exist_ok=True)
+            subtitle_path = override_dir / f"{clip.clip_id}.srt"
+            _write_subtitle_segments(subtitle_path, _legacy_override_segments_for_clip(clip))
             clip.asset_registry.subtitle_sidecars["override"] = str(subtitle_path)
             clip.asset_registry.subtitle_sidecars["active"] = str(subtitle_path)
         burner = SubtitleBurner(
@@ -430,7 +560,7 @@ class EditorService:
     def _cover_worker(self, manifest_path: Path, clip_id: str, _job, progress_callback) -> dict[str, Any]:
         manifest = load_manifest(manifest_path)
         clip = manifest.clip_by_id(clip_id)
-        source_clip = Path(clip.asset_registry.current_composed_clip or clip.asset_registry.raw_clip or "")
+        source_clip = Path(clip.asset_registry.raw_clip or clip.asset_registry.current_composed_clip or "")
         if not source_clip.exists():
             raise RuntimeError("No clip asset available for cover rerender")
         cover_dir = Path(manifest.project_root) / "covers"
@@ -525,7 +655,10 @@ def create_app(projects_root: str | Path = "processed_videos", jobs_dir: str | P
     def serve_spa(project_id: str | None = None):
         index = dist_dir / 'index.html'
         if index.exists():
-            return FileResponse(index)
+            return FileResponse(
+                index,
+                headers={'Cache-Control': 'no-store, no-cache, must-revalidate'},
+            )
         project_note = f"<p>Project: <code>{project_id}</code></p>" if project_id else ''
         return HTMLResponse(
             '<html><body><h1>OpenClip Editor</h1><p>The editor frontend has not been built yet.</p>' + project_note + '</body></html>'
@@ -585,14 +718,12 @@ def create_app(projects_root: str | Path = "processed_videos", jobs_dir: str | P
     @app.post('/projects/{project_id}/clips/{clip_id}/subtitle-override')
     def update_subtitle_override(project_id: str, clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         try:
-            return service.update_clip_subtitles(project_id, clip_id, payload.get('subtitle_text', ''))
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
-
-    @app.post('/api/projects/{project_id}/clips/{clip_id}/subtitle/regenerate')
-    def regenerate_subtitle_override(project_id: str, clip_id: str) -> dict[str, Any]:
-        try:
-            return service.regenerate_subtitle_text(project_id, clip_id)
+            return service.update_clip_subtitles(
+                project_id,
+                clip_id,
+                payload.get('subtitle_text', ''),
+                payload.get('subtitle_segments'),
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
 

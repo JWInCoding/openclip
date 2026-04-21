@@ -153,8 +153,32 @@ class TitleRecipe:
 
 
 @dataclass
+class SubtitleSegment:
+    start_time: str
+    end_time: str
+    text: str
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any] | None) -> "SubtitleSegment":
+        payload = payload or {}
+        return cls(
+            start_time=payload.get("start_time", "00:00:00,000"),
+            end_time=payload.get("end_time", "00:00:00,500"),
+            text=payload.get("text", ""),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "text": self.text,
+        }
+
+
+@dataclass
 class SubtitleRecipe:
     override_text: Optional[str] = None
+    override_segments: List[SubtitleSegment] = field(default_factory=list)
     translation: Optional[str] = None
     style_preset: str = "default"
     style_font_size: str = "medium"
@@ -167,6 +191,7 @@ class SubtitleRecipe:
         payload = payload or {}
         return cls(
             override_text=payload.get("override_text"),
+            override_segments=[SubtitleSegment.from_dict(item) for item in payload.get("override_segments", [])],
             translation=payload.get("translation"),
             style_preset=payload.get("style_preset", "default"),
             style_font_size=payload.get("style_font_size", "medium"),
@@ -178,6 +203,7 @@ class SubtitleRecipe:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "override_text": self.override_text,
+            "override_segments": [segment.to_dict() for segment in self.override_segments],
             "translation": self.translation,
             "style_preset": self.style_preset,
             "style_font_size": self.style_font_size,
@@ -185,6 +211,12 @@ class SubtitleRecipe:
             "style_bilingual_layout": self.style_bilingual_layout,
             "style_background_style": self.style_background_style,
         }
+
+    @property
+    def has_override(self) -> bool:
+        if self.override_segments:
+            return True
+        return bool((self.override_text or "").strip())
 
 
 @dataclass

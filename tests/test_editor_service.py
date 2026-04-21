@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from core.editor.manifest import load_manifest, save_manifest, upsert_manifest
+from core.editor.models import SubtitleSegment
 from core.editor.service import EditorService, create_app
 
 
@@ -93,8 +94,17 @@ def test_editor_service_load_update_and_rerender_contract(tmp_path):
     assert updated_clip["absolute_time_range"] == "00:01:12 - 00:01:27"
     assert updated_clip["recovery"]["cover_dirty"] is True
 
-    updated_clip = service.update_clip_subtitles(manifest.project_id, clip_id, "Edited subtitle")
-    assert updated_clip["subtitle_recipe"]["override_text"] == "Edited subtitle"
+    updated_clip = service.update_clip_subtitles(
+        manifest.project_id,
+        clip_id,
+        subtitle_segments=[
+            {"start_time": "00:00:00,000", "end_time": "00:00:01,000", "text": "Edited subtitle"},
+            {"start_time": "00:00:01,000", "end_time": "00:00:02,000", "text": "Follow-up line"},
+        ],
+    )
+    assert updated_clip["subtitle_recipe"]["override_text"] == "Edited subtitle\nFollow-up line"
+    assert updated_clip["subtitle_segments"][0]["text"] == "Edited subtitle"
+    assert updated_clip["subtitle_segments"][1]["text"] == "Follow-up line"
 
     updated_clip = service.update_cover_title(manifest.project_id, clip_id, "New Cover Title")
     assert updated_clip["cover_recipe"]["text"] == "New Cover Title"
@@ -105,6 +115,7 @@ def test_editor_service_load_update_and_rerender_contract(tmp_path):
     job_status = service.get_job_status(rerender["job_id"])
     assert job_status["status"] in {"pending", "processing", "completed", "failed"}
     assert job_status["options"]["clip_id"] == clip_id
+    assert job_status["options"]["projects_root"] == str(projects_root.resolve())
 
     saved_manifest = load_manifest(Path(manifest.project_root) / "editor_project.json")
     saved_clip = saved_manifest.clip_by_id(clip_id)
@@ -146,6 +157,30 @@ def test_editor_service_fastapi_routes(tmp_path):
     assert rerender.status_code == 200
     assert rerender.json()["operation"] == "boundary"
 
+    subtitle = client.patch(
+        f"/api/projects/{manifest.project_id}/clips/{clip_id}/subtitle",
+        json={
+            "subtitle_segments": [
+                {"start_time": "00:00:00,000", "end_time": "00:00:01,000", "text": "First cue"},
+                {"start_time": "00:00:01,000", "end_time": "00:00:02,000", "text": "Second cue"},
+            ]
+        },
+    )
+    assert subtitle.status_code == 200
+    assert subtitle.json()["subtitle_segments"][0]["text"] == "First cue"
+    assert subtitle.json()["subtitle_segments"][1]["text"] == "Second cue"
+
+
+def test_editor_spa_html_is_not_cached(tmp_path):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    app = create_app(projects_root=projects_root, jobs_dir=jobs_dir)
+    client = TestClient(app)
+
+    response = client.get(f"/projects/{manifest.project_id}")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+
 
 def test_cover_title_update_does_not_mutate_title_overlay_recipe(tmp_path):
     manifest, projects_root, jobs_dir = _create_project(tmp_path)
@@ -157,6 +192,29 @@ def test_cover_title_update_does_not_mutate_title_overlay_recipe(tmp_path):
     assert updated['cover_recipe']['text'] == 'Cover Only Title'
     assert updated['title_recipe']['text'] == 'Test Clip'
     assert updated['title'] == 'Test Clip'
+
+
+def test_cover_worker_prefers_raw_clip_over_post_processed_clip(tmp_path, monkeypatch):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    manifest_path = Path(manifest.project_root) / 'editor_project.json'
+    clip = manifest.clips[0]
+    save_manifest(manifest, manifest_path)
+
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+    calls = {'source_clip': None}
+
+    def fake_generate_cover(self, video_path, title_text, output_path, **_kwargs):
+        calls['source_clip'] = video_path
+        Path(output_path).write_bytes(b'jpg')
+        Path(output_path.replace('.jpg', '_vertical.jpg')).write_bytes(b'jpg')
+        return True
+
+    monkeypatch.setattr('core.cover_image_generator.CoverImageGenerator.generate_cover', fake_generate_cover, raising=False)
+
+    result = service._cover_worker(manifest_path, clip.clip_id, None, lambda *_args: None)
+
+    assert result['horizontal_cover'].endswith('.jpg')
+    assert calls['source_clip'] == clip.asset_registry.raw_clip
 
 
 def test_subtitle_worker_preserves_original_generation_behavior_without_titles(tmp_path, monkeypatch):
@@ -187,6 +245,70 @@ def test_subtitle_worker_preserves_original_generation_behavior_without_titles(t
     assert result['current_composed_clip'].endswith('.mp4')
     assert calls['subtitle_only'] == 1
     assert calls['title_overlay'] == 0
+
+
+def test_subtitle_worker_writes_override_segments_with_original_timings(tmp_path, monkeypatch):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    manifest_path = Path(manifest.project_root) / 'editor_project.json'
+    clip = manifest.clips[0]
+    clip.metadata['title_overlay_enabled'] = False
+    clip.subtitle_recipe.override_text = 'Edited subtitle\nFollow-up line'
+    clip.subtitle_recipe.override_segments = [
+        SubtitleSegment(start_time='00:00:00,000', end_time='00:00:01,200', text='Edited subtitle'),
+        SubtitleSegment(start_time='00:00:01,200', end_time='00:00:02,500', text='Follow-up line'),
+    ]
+    save_manifest(manifest, manifest_path)
+
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+    calls = {'subtitle_path': None, 'subtitle_content': None}
+
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None):
+        calls['subtitle_path'] = str(srt)
+        calls['subtitle_content'] = Path(srt).read_text(encoding='utf-8')
+        Path(output).write_bytes(b'composed-updated')
+        return True
+
+    monkeypatch.setattr('core.subtitle_burner.SubtitleBurner._process_clip', fake_process_clip, raising=False)
+
+    service._subtitle_worker(manifest_path, clip.clip_id, None, lambda *_args: None)
+
+    assert calls['subtitle_path'] is not None
+    assert "00:00:00,000 --> 00:00:01,200" in calls['subtitle_content']
+    assert "00:00:01,200 --> 00:00:02,500" in calls['subtitle_content']
+    assert "Edited subtitle" in calls['subtitle_content']
+    assert "Follow-up line" in calls['subtitle_content']
+
+
+def test_legacy_override_text_is_mapped_onto_derived_subtitle_timings(tmp_path):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    source_subtitle = tmp_path / "source_multi.srt"
+    source_subtitle.write_text(
+        "\n\n".join(
+            [
+                "1\n00:00:10,000 --> 00:00:11,000\nFirst original",
+                "2\n00:00:11,000 --> 00:00:12,000\nSecond original",
+                "3\n00:00:12,000 --> 00:00:13,000\nThird original",
+            ]
+        ) + "\n",
+        encoding="utf-8",
+    )
+    manifest_path = Path(manifest.project_root) / "editor_project.json"
+    clip = manifest.clips[0]
+    clip.metadata["source_subtitle_path"] = str(source_subtitle)
+    clip.start_time = "00:00:10"
+    clip.end_time = "00:00:13"
+    clip.subtitle_recipe.override_text = "Line one\nLine two\nLine three"
+    clip.subtitle_recipe.override_segments = []
+    save_manifest(manifest, manifest_path)
+
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+
+    serialized = service.get_clip(manifest.project_id, clip.clip_id)
+
+    assert [segment["text"] for segment in serialized["subtitle_segments"]] == ["Line one", "Line two", "Line three"]
+    assert serialized["subtitle_segments"][0]["start_time"] == "00:00:00,000"
+    assert serialized["subtitle_segments"][1]["start_time"] == "00:00:01,000"
+    assert serialized["subtitle_segments"][2]["start_time"] == "00:00:02,000"
 
 
 def test_boundary_worker_refreshes_post_processed_clip_when_subtitles_are_derived(tmp_path, monkeypatch):
@@ -276,20 +398,29 @@ def test_request_rerender_rejects_duplicate_pending_job(tmp_path):
         service.request_rerender(manifest.project_id, clip_id, 'cover')
 
 
-def test_bounds_change_marks_manual_subtitle_override_stale_and_regeneration_replaces_it(tmp_path):
+def test_boundary_rerender_queue_clears_manual_subtitle_override_immediately(tmp_path, monkeypatch):
     manifest, projects_root, jobs_dir = _create_project(tmp_path)
     service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
     clip_id = manifest.clips[0].clip_id
 
-    service.update_clip_subtitles(manifest.project_id, clip_id, 'Manual override text')
-    updated_clip = service.update_clip_bounds(manifest.project_id, clip_id, "00:01:12", "00:01:27")
-    assert updated_clip["metadata"]["subtitle_stale"] is True
-    assert updated_clip["subtitle_recipe"]["override_text"] == 'Manual override text'
+    service.update_clip_subtitles(
+        manifest.project_id,
+        clip_id,
+        subtitle_segments=[
+            {"start_time": "00:00:00,000", "end_time": "00:00:01,000", "text": "Manual override text"},
+        ],
+    )
+    service.update_clip_bounds(manifest.project_id, clip_id, "00:01:12", "00:01:27")
 
-    regenerated = service.regenerate_subtitle_text(manifest.project_id, clip_id)
-    assert regenerated["metadata"]["subtitle_stale"] is False
-    assert regenerated["subtitle_recipe"]["override_text"] != 'Manual override text'
-    assert regenerated["effective_subtitle_text"] == regenerated["subtitle_recipe"]["override_text"]
+    monkeypatch.setattr(service.job_manager, "start_job", lambda *_args, **_kwargs: None)
+
+    queued = service.request_rerender(manifest.project_id, clip_id, "boundary")
+    assert queued["status"] == "pending"
+
+    refreshed_clip = service.get_clip(manifest.project_id, clip_id)
+    assert refreshed_clip["subtitle_recipe"]["override_text"] is None
+    assert refreshed_clip["subtitle_recipe"]["override_segments"] == []
+    assert refreshed_clip["effective_subtitle_text"] == "Hello"
 
 
 def test_update_clip_bounds_rejects_absolute_range_past_part_end(tmp_path):
