@@ -1,0 +1,653 @@
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+from fastapi import Body, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
+from core.clip_generator import ClipGenerator
+from core.cover_image_generator import COVER_COLORS, CoverImageGenerator
+from core.editor.manifest import (
+    discover_manifest_by_project_id,
+    format_seconds_as_timecode,
+    list_manifest_paths,
+    load_manifest,
+    parse_timecode_to_seconds,
+    reconcile_manifest,
+    save_manifest,
+)
+from core.editor.models import EditorClip, EditorManifest, utc_now_iso
+from core.subtitle_burner import SubtitleBurner, SubtitleStyleConfig
+from core.title_adder import TitleAdder
+from job_manager import JobManager
+
+logger = logging.getLogger(__name__)
+
+
+def _read_effective_subtitle_text(path: str | None) -> str:
+    if not path:
+        return ''
+    subtitle_path = Path(path)
+    if not subtitle_path.exists():
+        return ''
+    try:
+        content = subtitle_path.read_text(encoding='utf-8')
+    except Exception:
+        return ''
+    lines = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.isdigit() or '-->' in line:
+            continue
+        lines.append(line)
+    return '\n'.join(lines).strip()
+
+
+def _derive_subtitle_text_for_bounds(clip: EditorClip) -> str:
+    source_subtitle_path = clip.metadata.get("source_subtitle_path")
+    if not source_subtitle_path:
+        return _read_effective_subtitle_text(clip.asset_registry.subtitle_active)
+
+    subtitle_path = Path(source_subtitle_path)
+    if not subtitle_path.exists():
+        return _read_effective_subtitle_text(clip.asset_registry.subtitle_active)
+
+    try:
+        segments = ClipGenerator(output_dir=str(subtitle_path.parent))._parse_srt_file(str(subtitle_path))
+    except Exception:
+        return _read_effective_subtitle_text(clip.asset_registry.subtitle_active)
+
+    clip_start = parse_timecode_to_seconds(clip.start_time)
+    clip_end = parse_timecode_to_seconds(clip.end_time)
+    lines: list[str] = []
+    for segment in segments:
+        seg_start = parse_timecode_to_seconds(segment.get("start_time"))
+        seg_end = parse_timecode_to_seconds(segment.get("end_time"))
+        if seg_end > clip_start and seg_start < clip_end:
+            text = str(segment.get("text", "")).strip()
+            if text:
+                lines.append(text)
+    return "\n".join(lines).strip()
+
+
+def _resolve_cover_color(value: Any, fallback_name: str) -> Any:
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        return tuple(int(channel) for channel in value)
+    return COVER_COLORS.get(str(value), COVER_COLORS[fallback_name])
+
+
+class EditorService:
+    def __init__(self, projects_root: str | Path = "processed_videos", jobs_dir: str | Path = "jobs"):
+        self.projects_root = Path(projects_root)
+        self.jobs_dir = Path(jobs_dir)
+        self.job_manager = JobManager(str(self.jobs_dir))
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        projects: list[dict[str, Any]] = []
+        for manifest_path in list_manifest_paths(self.projects_root):
+            try:
+                manifest = load_manifest(manifest_path)
+            except Exception:
+                continue
+            projects.append(
+                {
+                    "project_id": manifest.project_id,
+                    "source_video_title": manifest.source_video_title,
+                    "project_root": manifest.project_root,
+                    "clip_count": len(manifest.clips),
+                    "updated_at": manifest.updated_at,
+                    "manifest_path": str(manifest_path),
+                }
+            )
+        return projects
+
+    def _manifest_path(self, project_id: str) -> Path:
+        path = discover_manifest_by_project_id(self.projects_root, project_id)
+        if path is None:
+            raise KeyError(project_id)
+        return path
+
+    def _load_manifest(self, project_id: str) -> tuple[EditorManifest, Path]:
+        manifest_path = self._manifest_path(project_id)
+        manifest = load_manifest(manifest_path)
+        if reconcile_manifest(manifest, job_manager=self.job_manager, jobs_dir=self.jobs_dir):
+            save_manifest(manifest, manifest_path)
+        return manifest, manifest_path
+
+    def _save_manifest(self, manifest: EditorManifest, manifest_path: Path) -> None:
+        manifest.updated_at = utc_now_iso()
+        save_manifest(manifest, manifest_path)
+
+    @staticmethod
+    def _resolve_media_path(path: str | None) -> Path | None:
+        if not path:
+            return None
+        candidate = Path(path)
+        if not candidate.exists():
+            return None
+        return candidate
+
+    def _project_media_url(self, project_id: str, media_kind: str) -> str:
+        return f"/api/projects/{project_id}/media/{media_kind}"
+
+    def _clip_media_url(self, project_id: str, clip_id: str, media_kind: str) -> str:
+        return f"/api/projects/{project_id}/clips/{clip_id}/media/{media_kind}"
+
+    def _serialize_clip(self, clip: EditorClip) -> dict[str, Any]:
+        payload = clip.to_dict()
+        payload["active_subtitle_path"] = clip.asset_registry.subtitle_active
+        payload["effective_subtitle_text"] = clip.subtitle_recipe.override_text or _derive_subtitle_text_for_bounds(clip)
+        payload["has_manual_subtitle_override"] = bool(clip.subtitle_recipe.override_text and clip.subtitle_recipe.override_text.strip())
+        payload["recovery_state"] = clip.recovery.recovery_state
+        payload["last_error"] = clip.recovery.last_error
+        payload["pending_job_id"] = clip.recovery.pending_job_id
+        payload["pending_operation"] = clip.recovery.pending_operation
+        return payload
+
+    def _serialize_project(self, manifest: EditorManifest) -> dict[str, Any]:
+        clips = []
+        for clip in manifest.clips:
+            serialized_clip = self._serialize_clip(clip)
+            serialized_clip["source_video_url"] = self._project_media_url(manifest.project_id, "source")
+            serialized_clip["raw_clip_url"] = self._clip_media_url(manifest.project_id, clip.clip_id, "raw")
+            serialized_clip["current_composed_clip_url"] = self._clip_media_url(manifest.project_id, clip.clip_id, "current")
+            serialized_clip["horizontal_cover_url"] = self._clip_media_url(manifest.project_id, clip.clip_id, "horizontal_cover")
+            serialized_clip["vertical_cover_url"] = self._clip_media_url(manifest.project_id, clip.clip_id, "vertical_cover")
+            clips.append(serialized_clip)
+        return {
+            "project_id": manifest.project_id,
+            "schema_version": manifest.schema_version,
+            "source_video_title": manifest.source_video_title,
+            "source_video_path": manifest.source_video_path,
+            "source_video_url": self._project_media_url(manifest.project_id, "source"),
+            "source_video_duration": manifest.source_video_duration,
+            "project_root": manifest.project_root,
+            "created_at": manifest.created_at,
+            "updated_at": manifest.updated_at,
+            "active_clip_id": clips[0]["clip_id"] if clips else None,
+            "clips": clips,
+        }
+
+    def load_project(self, project_id: str) -> dict[str, Any]:
+        manifest, _ = self._load_manifest(project_id)
+        return self._serialize_project(manifest)
+
+    def get_clip(self, project_id: str, clip_id: str) -> dict[str, Any]:
+        manifest, _ = self._load_manifest(project_id)
+        return self._serialize_clip(manifest.clip_by_id(clip_id))
+
+    def update_clip_bounds(self, project_id: str, clip_id: str, start: str | float, end: str | float) -> dict[str, Any]:
+        manifest, manifest_path = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        absolute_start_seconds = parse_timecode_to_seconds(start)
+        absolute_end_seconds = parse_timecode_to_seconds(end)
+        max_duration = manifest.source_video_duration or clip.source_video_duration
+        if absolute_start_seconds < 0:
+            raise ValueError("Clip start must be >= 0")
+        if absolute_end_seconds <= absolute_start_seconds:
+            raise ValueError("Clip end must be greater than start")
+        if max_duration is not None and absolute_end_seconds > float(max_duration):
+            raise ValueError("Clip end exceeds source duration")
+        local_start_seconds = absolute_start_seconds - float(clip.part_offset_seconds or 0.0)
+        local_end_seconds = absolute_end_seconds - float(clip.part_offset_seconds or 0.0)
+        if local_start_seconds < 0:
+            raise ValueError("Clip start cannot move before the start of its source part")
+        if local_end_seconds <= local_start_seconds:
+            raise ValueError("Clip end must remain after clip start within its source part")
+        if clip.part_duration_seconds is not None and local_end_seconds > float(clip.part_duration_seconds):
+            raise ValueError("Clip end cannot move past the end of its source part")
+
+        clip.start_time = format_seconds_as_timecode(local_start_seconds)
+        clip.end_time = format_seconds_as_timecode(local_end_seconds)
+        clip.time_range = f"{clip.start_time} - {clip.end_time}"
+        clip.absolute_start_time = format_seconds_as_timecode(absolute_start_seconds)
+        clip.absolute_end_time = format_seconds_as_timecode(absolute_end_seconds)
+        clip.absolute_time_range = f"{clip.absolute_start_time} - {clip.absolute_end_time}"
+        clip.duration = round(absolute_end_seconds - absolute_start_seconds, 3)
+        clip.recovery.dirty = True
+        clip.recovery.cover_dirty = True
+        clip.recovery.recovery_state = "dirty"
+        clip.recovery.last_error = None
+        clip.updated_at = utc_now_iso()
+        clip.metadata["cover_dirty"] = True
+        if clip.subtitle_recipe.override_text and clip.subtitle_recipe.override_text.strip():
+            clip.metadata["subtitle_stale"] = True
+        self._save_manifest(manifest, manifest_path)
+        return self._serialize_clip(clip)
+
+    def update_clip_subtitles(self, project_id: str, clip_id: str, subtitle_text: str) -> dict[str, Any]:
+        manifest, manifest_path = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        clip.subtitle_recipe.override_text = subtitle_text
+        clip.recovery.dirty = True
+        clip.recovery.recovery_state = "dirty"
+        clip.recovery.last_error = None
+        clip.updated_at = utc_now_iso()
+        clip.metadata["subtitle_stale"] = False
+        self._save_manifest(manifest, manifest_path)
+        return self._serialize_clip(clip)
+
+    def regenerate_subtitle_text(self, project_id: str, clip_id: str) -> dict[str, Any]:
+        manifest, manifest_path = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        regenerated_text = _derive_subtitle_text_for_bounds(clip)
+        clip.subtitle_recipe.override_text = regenerated_text
+        clip.recovery.dirty = True
+        clip.recovery.recovery_state = "dirty"
+        clip.recovery.last_error = None
+        clip.updated_at = utc_now_iso()
+        clip.metadata["subtitle_stale"] = False
+        self._save_manifest(manifest, manifest_path)
+        return self._serialize_clip(clip)
+
+    def update_cover_title(self, project_id: str, clip_id: str, title_text: str) -> dict[str, Any]:
+        manifest, manifest_path = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        clip.cover_recipe.text = title_text
+        clip.recovery.cover_dirty = True
+        clip.recovery.dirty = True
+        clip.recovery.recovery_state = "dirty"
+        clip.recovery.last_error = None
+        clip.updated_at = utc_now_iso()
+        clip.metadata["cover_dirty"] = True
+        self._save_manifest(manifest, manifest_path)
+        return self._serialize_clip(clip)
+
+    def preview_bounds(self, project_id: str, clip_id: str, start: str | float, end: str | float) -> dict[str, Any]:
+        manifest, _ = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        absolute_start_seconds = parse_timecode_to_seconds(start)
+        absolute_end_seconds = parse_timecode_to_seconds(end)
+        local_start_seconds = absolute_start_seconds - float(clip.part_offset_seconds or 0.0)
+        local_end_seconds = absolute_end_seconds - float(clip.part_offset_seconds or 0.0)
+        if local_start_seconds < 0:
+            raise ValueError("Preview start cannot move before the start of its source part")
+        if clip.part_duration_seconds is not None and local_end_seconds > float(clip.part_duration_seconds):
+            raise ValueError("Preview end cannot move past the end of its source part")
+        return {
+            "project_id": project_id,
+            "clip_id": clip_id,
+            "source_video_path": manifest.source_video_path or clip.source_video_path,
+            "source_video_url": self._project_media_url(project_id, "source"),
+            "preview_start_time": format_seconds_as_timecode(absolute_start_seconds),
+            "preview_end_time": format_seconds_as_timecode(absolute_end_seconds),
+            "current_time_range": clip.absolute_time_range,
+            "duration": round(max(0.0, absolute_end_seconds - absolute_start_seconds), 3),
+        }
+
+    def _queue_job(self, project_id: str, clip_id: str, operation: str, worker) -> dict[str, Any]:
+        manifest, manifest_path = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        if clip.recovery.pending_job_id:
+            raise ValueError(f"Clip {clip_id} already has a pending rerender job")
+        job_id = self.job_manager.create_job(
+            manifest.source_video_path or clip.source_video_path or clip.asset_registry.raw_clip or "",
+            {"kind": "editor_rerender", "project_id": project_id, "clip_id": clip_id, "operation": operation},
+        )
+        clip.recovery.pending_job_id = job_id
+        clip.recovery.pending_operation = operation
+        clip.recovery.pending_assets = {}
+        clip.recovery.last_good_assets = clip.snapshot_assets()
+        clip.recovery.dirty = True
+        clip.recovery.last_error = None
+        clip.recovery.recovery_state = "pending"
+        clip.updated_at = utc_now_iso()
+        self._save_manifest(manifest, manifest_path)
+        self.job_manager.start_job(job_id, lambda job, progress: worker(manifest_path, clip_id, job, progress))
+        return {"job_id": job_id, "project_id": project_id, "clip_id": clip_id, "operation": operation, "status": "pending"}
+
+    def _boundary_worker(self, manifest_path: Path, clip_id: str, _job, progress_callback) -> dict[str, Any]:
+        manifest = load_manifest(manifest_path)
+        clip = manifest.clip_by_id(clip_id)
+        raw_clip_path = Path(clip.asset_registry.raw_clip or "")
+        if not clip.source_video_path or not raw_clip_path:
+            raise RuntimeError("Missing source video or raw clip target for boundary rerender")
+        raw_clip_path.parent.mkdir(parents=True, exist_ok=True)
+        generator = ClipGenerator(output_dir=str(raw_clip_path.parent))
+        progress_callback("Recutting clip", 25)
+        if not generator._create_clip(clip.source_video_path, clip.start_time, clip.end_time, str(raw_clip_path), clip.title):
+            raise RuntimeError("Failed to recut clip")
+        source_subtitle_path = clip.metadata.get("source_subtitle_path")
+        subtitle_sidecars = dict(clip.asset_registry.subtitle_sidecars)
+        progress_callback("Refreshing subtitle sidecars", 55)
+        if source_subtitle_path:
+            original_path = Path(subtitle_sidecars.get("original") or raw_clip_path.with_suffix('.srt'))
+            if generator._extract_subtitle_from_file(source_subtitle_path, clip.start_time, clip.end_time, str(original_path)):
+                subtitle_sidecars["original"] = str(original_path)
+            whisper_path = subtitle_sidecars.get("whisper")
+            if whisper_path:
+                whisper_target = Path(whisper_path)
+                if generator._extract_subtitle_from_file(source_subtitle_path, clip.start_time, clip.end_time, str(whisper_target)):
+                    subtitle_sidecars["whisper"] = str(whisper_target)
+            subtitle_sidecars["active"] = subtitle_sidecars.get("whisper") or subtitle_sidecars.get("original")
+        clip.asset_registry.raw_clip = str(raw_clip_path)
+        clip.asset_registry.subtitle_sidecars = subtitle_sidecars
+        should_refresh_composed_clip = not (clip.subtitle_recipe.override_text or "").strip()
+        active_subtitle_path = Path(clip.asset_registry.subtitle_active or "")
+        if should_refresh_composed_clip and active_subtitle_path.exists():
+            progress_callback("Refreshing post-processed clip", 75)
+            current_composed_clip = self._render_current_composed_clip(
+                manifest,
+                clip,
+                progress_callback,
+                prepare_progress=82,
+                render_progress=90,
+            )
+        else:
+            current_composed_clip = str(raw_clip_path)
+            clip.asset_registry.current_composed_clip = current_composed_clip
+        clip.recovery.pending_assets = {
+            "raw_clip": clip.asset_registry.raw_clip,
+            "current_composed_clip": current_composed_clip,
+            "subtitle_sidecars": dict(clip.asset_registry.subtitle_sidecars),
+        }
+        clip.recovery.cover_dirty = True
+        clip.metadata["cover_dirty"] = True
+        save_manifest(manifest, manifest_path)
+        progress_callback("Boundary rerender complete", 95)
+        return {
+            "raw_clip": clip.asset_registry.raw_clip,
+            "current_composed_clip": current_composed_clip,
+            "subtitle_sidecars": dict(clip.asset_registry.subtitle_sidecars),
+        }
+
+    def _render_current_composed_clip(
+        self,
+        manifest: EditorManifest,
+        clip: EditorClip,
+        progress_callback,
+        *,
+        prepare_progress: int = 30,
+        render_progress: int = 70,
+    ) -> str:
+        raw_clip_path = Path(clip.asset_registry.raw_clip or "")
+        if not raw_clip_path.exists():
+            raise RuntimeError("Raw clip missing for subtitle rerender")
+        output_dir = Path(manifest.project_root) / "clips_post_processed"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / raw_clip_path.name
+        subtitle_path = Path(clip.asset_registry.subtitle_active or raw_clip_path.with_suffix('.srt'))
+        if clip.subtitle_recipe.override_text:
+            override_dir = Path(manifest.project_root) / "editor_overrides"
+            override_dir.mkdir(parents=True, exist_ok=True)
+            subtitle_path = override_dir / f"{clip.clip_id}.srt"
+            clip_duration = max(parse_timecode_to_seconds(clip.end_time) - parse_timecode_to_seconds(clip.start_time), 0.5)
+            subtitle_path.write_text(
+                f"1\n00:00:00,000 --> {format_seconds_as_timecode(clip_duration).replace('.', ',')}\n{clip.subtitle_recipe.override_text}\n",
+                encoding='utf-8',
+            )
+            clip.asset_registry.subtitle_sidecars["override"] = str(subtitle_path)
+            clip.asset_registry.subtitle_sidecars["active"] = str(subtitle_path)
+        burner = SubtitleBurner(
+            subtitle_style_config=SubtitleStyleConfig(
+                preset=clip.subtitle_recipe.style_preset,
+                font_size=clip.subtitle_recipe.style_font_size,
+                vertical_position=clip.subtitle_recipe.style_vertical_position,
+                bilingual_layout=clip.subtitle_recipe.style_bilingual_layout,
+                background_style=clip.subtitle_recipe.style_background_style,
+            )
+        )
+        title_overlay_enabled = bool(clip.metadata.get("title_overlay_enabled"))
+        if title_overlay_enabled:
+            ass_path = output_dir / f"{clip.clip_id}.ass"
+            progress_callback("Preparing subtitle overlay", prepare_progress)
+            burner.prepare_ass_for_clip(subtitle_path, ass_path, subtitle_translation=clip.subtitle_recipe.translation)
+            progress_callback("Compositing title and subtitle", render_progress)
+            adder = TitleAdder(output_dir=str(output_dir), language='zh')
+            if not adder._add_artistic_title(
+                str(raw_clip_path),
+                clip.title_recipe.text,
+                str(output_path),
+                clip.title_recipe.style,
+                clip.title_recipe.font_size,
+                ass_path=str(ass_path) if ass_path.exists() else None,
+            ):
+                raise RuntimeError("Failed to compose subtitle/title output")
+            ass_path.unlink(missing_ok=True)
+        else:
+            progress_callback("Burning subtitles", render_progress)
+            if not burner._process_clip(raw_clip_path, subtitle_path, output_path, clip.subtitle_recipe.translation):
+                raise RuntimeError("Failed to burn subtitle-only output")
+        clip.asset_registry.current_composed_clip = str(output_path)
+        return str(output_path)
+
+    def _subtitle_worker(self, manifest_path: Path, clip_id: str, _job, progress_callback) -> dict[str, Any]:
+        manifest = load_manifest(manifest_path)
+        clip = manifest.clip_by_id(clip_id)
+        output_path = self._render_current_composed_clip(manifest, clip, progress_callback)
+        clip.recovery.pending_assets = {
+            "current_composed_clip": output_path,
+            "subtitle_sidecars": dict(clip.asset_registry.subtitle_sidecars),
+        }
+        save_manifest(manifest, manifest_path)
+        return {"current_composed_clip": output_path}
+
+    def _cover_worker(self, manifest_path: Path, clip_id: str, _job, progress_callback) -> dict[str, Any]:
+        manifest = load_manifest(manifest_path)
+        clip = manifest.clip_by_id(clip_id)
+        source_clip = Path(clip.asset_registry.current_composed_clip or clip.asset_registry.raw_clip or "")
+        if not source_clip.exists():
+            raise RuntimeError("No clip asset available for cover rerender")
+        cover_dir = Path(manifest.project_root) / "covers"
+        cover_dir.mkdir(parents=True, exist_ok=True)
+        output_path = cover_dir / f"cover_{clip.clip_id}.jpg"
+        generator = CoverImageGenerator(language='zh')
+        progress_callback("Rendering covers", 60)
+        if not generator.generate_cover(
+            str(source_clip),
+            clip.cover_recipe.text,
+            str(output_path),
+            frame_time=0.0,
+            text_location=clip.cover_recipe.text_location,
+            fill_color=_resolve_cover_color(clip.cover_recipe.fill_color, 'yellow'),
+            outline_color=_resolve_cover_color(clip.cover_recipe.outline_color, 'black'),
+        ):
+            raise RuntimeError("Failed to rerender covers")
+        vertical_path = output_path.with_name(output_path.stem + '_vertical' + output_path.suffix)
+        clip.asset_registry.horizontal_cover = str(output_path)
+        if vertical_path.exists():
+            clip.asset_registry.vertical_cover = str(vertical_path)
+        clip.recovery.pending_assets = {"horizontal_cover": clip.asset_registry.horizontal_cover, "vertical_cover": clip.asset_registry.vertical_cover}
+        clip.recovery.cover_dirty = False
+        clip.metadata["cover_dirty"] = False
+        save_manifest(manifest, manifest_path)
+        return clip.recovery.pending_assets
+
+    def request_rerender(self, project_id: str, clip_id: str, operation: str) -> dict[str, Any]:
+        if operation not in {"boundary", "subtitles", "cover", "subtitle"}:
+            raise ValueError(f"Unsupported rerender operation: {operation}")
+        if operation == 'subtitle':
+            operation = 'subtitles'
+        worker = {
+            'boundary': self._boundary_worker,
+            'subtitles': self._subtitle_worker,
+            'cover': self._cover_worker,
+        }[operation]
+        return self._queue_job(project_id, clip_id, operation, worker)
+
+    def resume_rerender(self, project_id: str, clip_id: str) -> dict[str, Any]:
+        manifest, _ = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        operation = clip.recovery.pending_operation
+        if clip.recovery.recovery_state != "recoverable" or not operation:
+            raise ValueError("Clip is not in a recoverable rerender state")
+        return self.request_rerender(project_id, clip_id, operation)
+
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        job = self.job_manager.get_job(job_id)
+        if job is not None:
+            return job.to_dict()
+        job_path = self.jobs_dir / f"{job_id}.json"
+        if not job_path.exists():
+            raise KeyError(job_id)
+        return json.loads(job_path.read_text(encoding="utf-8"))
+
+    def get_project_media(self, project_id: str, media_kind: str) -> FileResponse:
+        manifest, _ = self._load_manifest(project_id)
+        if media_kind != "source":
+            raise KeyError(media_kind)
+        source_path = self._resolve_media_path(manifest.source_video_path)
+        if source_path is None:
+            raise FileNotFoundError("Source media is unavailable")
+        return FileResponse(source_path)
+
+    def get_clip_media(self, project_id: str, clip_id: str, media_kind: str) -> FileResponse:
+        manifest, _ = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        media_map = {
+            "raw": clip.asset_registry.raw_clip,
+            "current": clip.asset_registry.current_composed_clip,
+            "horizontal_cover": clip.asset_registry.horizontal_cover,
+            "vertical_cover": clip.asset_registry.vertical_cover,
+        }
+        media_path = self._resolve_media_path(media_map.get(media_kind))
+        if media_path is None:
+            raise FileNotFoundError(f"Clip media is unavailable for {media_kind}")
+        return FileResponse(media_path)
+
+
+def create_app(projects_root: str | Path = "processed_videos", jobs_dir: str | Path = "jobs") -> FastAPI:
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+    app = FastAPI(title="OpenClip Editor Service", version="0.1.0")
+    app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
+    app.state.editor_service = service
+
+    dist_dir = Path('editor_frontend/dist')
+    assets_dir = dist_dir / 'assets'
+    if assets_dir.exists():
+        app.mount('/assets', StaticFiles(directory=assets_dir), name='assets')
+
+    def serve_spa(project_id: str | None = None):
+        index = dist_dir / 'index.html'
+        if index.exists():
+            return FileResponse(index)
+        project_note = f"<p>Project: <code>{project_id}</code></p>" if project_id else ''
+        return HTMLResponse(
+            '<html><body><h1>OpenClip Editor</h1><p>The editor frontend has not been built yet.</p>' + project_note + '</body></html>'
+        )
+
+    @app.get('/')
+    def root():
+        return {'service': 'openclip-editor', 'status': 'ok'}
+
+    @app.get('/healthz')
+    def healthz() -> dict[str, str]:
+        return {'status': 'ok'}
+
+    @app.get('/projects')
+    @app.get('/api/projects')
+    def list_projects() -> list[dict[str, Any]]:
+        return service.list_projects()
+
+    @app.get('/projects/{project_id}')
+    def spa_project(project_id: str):
+        return serve_spa(project_id)
+
+    @app.get('/api/projects/{project_id}')
+    @app.get('/projects/{project_id}/data')
+    def load_project(project_id: str) -> dict[str, Any]:
+        try:
+            return service.load_project(project_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f'Unknown project_id: {project_id}') from None
+
+    @app.get('/api/projects/{project_id}/clips/{clip_id}')
+    @app.get('/projects/{project_id}/clips/{clip_id}')
+    def get_clip(project_id: str, clip_id: str) -> dict[str, Any]:
+        try:
+            return service.get_clip(project_id, clip_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.post('/api/projects/{project_id}/clips/{clip_id}/preview-bounds')
+    def preview_bounds(project_id: str, clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return service.preview_bounds(project_id, clip_id, payload.get('start_time') or payload.get('start'), payload.get('end_time') or payload.get('end'))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.patch('/api/projects/{project_id}/clips/{clip_id}/bounds')
+    @app.post('/projects/{project_id}/clips/{clip_id}/bounds')
+    def update_bounds(project_id: str, clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return service.update_clip_bounds(project_id, clip_id, payload.get('start_time') or payload.get('start'), payload.get('end_time') or payload.get('end'))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @app.patch('/api/projects/{project_id}/clips/{clip_id}/subtitle')
+    @app.post('/projects/{project_id}/clips/{clip_id}/subtitle-override')
+    def update_subtitle_override(project_id: str, clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return service.update_clip_subtitles(project_id, clip_id, payload.get('subtitle_text', ''))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.post('/api/projects/{project_id}/clips/{clip_id}/subtitle/regenerate')
+    def regenerate_subtitle_override(project_id: str, clip_id: str) -> dict[str, Any]:
+        try:
+            return service.regenerate_subtitle_text(project_id, clip_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.patch('/api/projects/{project_id}/clips/{clip_id}/cover-title')
+    @app.post('/projects/{project_id}/clips/{clip_id}/cover-title')
+    def update_cover_title(project_id: str, clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return service.update_cover_title(project_id, clip_id, payload.get('title_text', ''))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.post('/api/projects/{project_id}/clips/{clip_id}/rerender/{operation}')
+    @app.post('/projects/{project_id}/clips/{clip_id}/rerender/{operation}')
+    def rerender_clip(project_id: str, clip_id: str, operation: str) -> dict[str, Any]:
+        try:
+            return service.request_rerender(project_id, clip_id, operation)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @app.post('/api/projects/{project_id}/clips/{clip_id}/resume')
+    @app.post('/projects/{project_id}/clips/{clip_id}/resume')
+    def resume_clip(project_id: str, clip_id: str) -> dict[str, Any]:
+        try:
+            return service.resume_rerender(project_id, clip_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @app.get('/api/jobs/{job_id}')
+    @app.get('/jobs/{job_id}')
+    def get_job(job_id: str) -> dict[str, Any]:
+        try:
+            return service.get_job_status(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f'Unknown job_id: {job_id}') from None
+
+    @app.get('/api/projects/{project_id}/media/{media_kind}')
+    def get_project_media(project_id: str, media_kind: str):
+        try:
+            return service.get_project_media(project_id, media_kind)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f'Unknown media kind: {media_kind}') from None
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.get('/api/projects/{project_id}/clips/{clip_id}/media/{media_kind}')
+    def get_clip_media(project_id: str, clip_id: str, media_kind: str):
+        try:
+            return service.get_clip_media(project_id, clip_id, media_kind)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    return app
