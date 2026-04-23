@@ -61,7 +61,7 @@ def build_whisper_initial_prompt(language: Optional[str]) -> Optional[str]:
         return "以下是普通话的简体中文字幕。"
     return None
 
-def run_whisper_cli(file_path, model_name=WHISPER_MODEL, language=None, output_format="srt", output_dir=None):
+def run_whisper_cli(file_path, model_name=WHISPER_MODEL, language=None, output_format="srt", output_dir=None, word_timestamps=False):
     """
     Transcribe audio/video file using OpenAI Whisper CLI
 
@@ -71,6 +71,9 @@ def run_whisper_cli(file_path, model_name=WHISPER_MODEL, language=None, output_f
         language (str): Language code (e.g., 'en', 'zh', 'ja') or None for auto-detection
         output_format (str): Output format (txt, vtt, srt, tsv, json, all)
         output_dir (str): Directory to write output files to (defaults to current directory)
+        word_timestamps (bool): Enable word-level timestamps for finer segment boundaries.
+            Use False (default) for fast analysis transcripts (splits stage).
+            Use True for final subtitle burning (clip stage) to prevent oversized segments.
 
     Returns:
         bool: True if successful, False if failed
@@ -95,6 +98,13 @@ def run_whisper_cli(file_path, model_name=WHISPER_MODEL, language=None, output_f
     if initial_prompt:
         cmd.extend(["--initial_prompt", initial_prompt])
         print("🈶 Script preference: Simplified Chinese")
+
+    if word_timestamps:
+        # Word-level timestamps give finer segment boundaries: Whisper aligns at
+        # the word level first, then cuts at natural word edges rather than
+        # merging multiple sentences into one long subtitle block.
+        cmd.extend(["--word_timestamps", "True"])
+        print("📐 word_timestamps=True: finer segment boundaries")
     
     try:
         print("\n⏳ Running Whisper...")

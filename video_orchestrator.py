@@ -19,7 +19,7 @@ import shutil
 from core.downloaders import VideoDownloader, DownloadProcessor
 from core.file_string_utils import FileStringUtils
 from core.video_splitter import VideoSplitter
-from core.transcript_generation_whisper import TranscriptProcessor
+from core.transcript_generation_whisper import TranscriptProcessor, run_whisper_cli
 from core.engaging_moments_analyzer import EngagingMomentsAnalyzer
 from core.insights_analyzer import InsightsAnalyzer
 from core.analysis_coordinator import AnalysisCoordinator
@@ -476,6 +476,38 @@ class VideoOrchestrator:
                 )
                 result.clip_generation = clip_result
                 
+                # Step 5.5: Transcribe each clip video directly with word_timestamps=True
+                # to generate clean, well-segmented subtitles for burning.
+                # Whisper CLI writes <stem>.srt into the output_dir, which is the clips
+                # directory — subtitle_burner will pick it up by the same stem name.
+                if self.subtitle_burner is not None and clip_result.get('success'):
+                    _clips_info = clip_result.get('clips_info', [])
+                    _clip_filenames = [c['filename'] for c in _clips_info if c.get('filename')]
+                    _source_clips_dir = Path(clip_result['output_dir'])
+                    _n = len(_clip_filenames)
+                    logger.info(f"🎙️  Step 5.5: Transcribing {_n} clip(s) for subtitles...")
+                    for _i, _filename in enumerate(_clip_filenames, 1):
+                        _clip_mp4 = _source_clips_dir / _filename
+                        if not _clip_mp4.exists():
+                            continue
+                        _srt = _clip_mp4.with_suffix(".srt")
+                        if _srt.exists():
+                            logger.info(f"  [{_i}/{_n}] Skipping (already exists): {_srt.name}")
+                            continue
+                        logger.info(f"  [{_i}/{_n}] Transcribing: {_clip_mp4.name}")
+                        _ok = run_whisper_cli(
+                            str(_clip_mp4),
+                            model_name=self.transcript_processor.whisper_model,
+                            language=None,  # auto-detect per clip
+                            output_format="srt",
+                            output_dir=str(_source_clips_dir),
+                            word_timestamps=True,
+                        )
+                        if _ok and _srt.exists():
+                            logger.info(f"  ✓ Saved: {_srt.name}")
+                        else:
+                            logger.warning(f"  ⚠ Transcription failed for {_clip_mp4.name}, clip will have no subtitles")
+
                 # Step 6: Post-processing (titles and/or subtitles) → clips_post_processed/
                 has_titles    = self.title_adder is not None
                 has_subtitles = self.subtitle_burner is not None

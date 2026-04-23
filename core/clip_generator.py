@@ -136,30 +136,6 @@ class ClipGenerator:
                 )
 
                 if success:
-                    # Generate subtitle file for the clip
-                    subtitle_filename = f"rank_{rank:02d}_{safe_title}.srt"
-                    subtitle_path = self.output_dir / subtitle_filename
-                    subtitle_generated = self._extract_subtitle_for_clip(
-                        video_part,
-                        effective_start_time,
-                        effective_end_time,
-                        str(subtitle_path),
-                        subtitle_dir
-                    )
-                    whisper_subtitle_filename = None
-                    whisper_subtitle_source = moment.get("whisper_subtitle_source")
-                    if whisper_subtitle_source:
-                        whisper_subtitle_filename = f"rank_{rank:02d}_{safe_title}.whisper.srt"
-                        whisper_subtitle_path = self.output_dir / whisper_subtitle_filename
-                        whisper_subtitle_generated = self._extract_subtitle_from_file(
-                            whisper_subtitle_source,
-                            effective_start_time,
-                            effective_end_time,
-                            str(whisper_subtitle_path),
-                        )
-                        if not whisper_subtitle_generated:
-                            whisper_subtitle_filename = None
-                    
                     effective_duration = max(
                         0.0,
                         self._parse_time_flexible(effective_end_time)
@@ -170,8 +146,6 @@ class ClipGenerator:
                         'rank': rank,
                         'title': title,
                         'filename': output_filename,
-                        'subtitle_filename': subtitle_filename if subtitle_generated else None,
-                        'whisper_subtitle_filename': whisper_subtitle_filename,
                         'duration': round(effective_duration or duration, 3),
                         'video_part': video_part,
                         'time_range': f"{effective_start_time} - {effective_end_time}",
@@ -181,12 +155,6 @@ class ClipGenerator:
                         'why_engaging': moment['why_engaging']
                     })
                     logger.info(f"✓ Saved: {output_filename}")
-                    if subtitle_generated:
-                        logger.info(f"✓ Subtitle: {subtitle_filename}")
-                    else:
-                        logger.info(f"⚠ No subtitle generated for this clip")
-                    if whisper_subtitle_filename:
-                        logger.info(f"✓ Whisper subtitle: {whisper_subtitle_filename}")
                 else:
                     logger.error(f"✗ Failed: {output_filename}")
             

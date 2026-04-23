@@ -315,10 +315,7 @@ class SubtitleBurner:
 
     @staticmethod
     def preferred_subtitle_path_for_clip(mp4: Path) -> Path:
-        """Prefer a Whisper sidecar when present, otherwise fall back to the default SRT."""
-        whisper_srt = mp4.with_suffix(".whisper.srt")
-        if whisper_srt.exists():
-            return whisper_srt
+        """Return the SRT subtitle path for a clip (same stem, .srt extension)."""
         return mp4.with_suffix(".srt")
 
     def prepare_ass_for_clip(
@@ -338,8 +335,9 @@ class SubtitleBurner:
         segments = self._parse_srt(srt_path)
         if not segments:
             return False
-        translated = self._translate_srt(segments, subtitle_translation) if subtitle_translation and self.client else None
-        ass_path.write_text(self._generate_ass(segments, translated), encoding="utf-8")
+        translation_requested = bool(subtitle_translation and self.client)
+        translated = self._translate_srt(segments, subtitle_translation) if translation_requested else None
+        ass_path.write_text(self._generate_ass(segments, translated, translation_requested), encoding="utf-8")
         return True
 
     def generate_preview_image(
@@ -442,33 +440,81 @@ class SubtitleBurner:
                 segments[i]["end"] = segments[i + 1]["start"]
         return segments
 
+    # Matches lines like: "1|text", "1. text", "1: text", "1）text"
+    # Also tolerates a full-width pipe ｜ in place of |
+    # Allow empty translation content (.*) so lines like "4|" don't get
+    # misclassified as prose and cause a count mismatch.
+    _TRANSLATION_LINE_RE = re.compile(
+        r"^(\d+)\s*[|｜.：:）)]\s*(.*)$"
+    )
+
     def _parse_numbered_translation_lines(self, text: str, expected_count: int) -> list[str] | None:
         """
         Parse translation output in the form:
           1|translated text
           2|translated text
+
+        Tolerates common LLM formatting deviations before giving up:
+          - Markdown code fences (``` ... ```)
+          - Leading/trailing prose lines that contain no id (skipped)
+          - Full-width pipe ｜ instead of |
+          - Alternative separators: ". ", ": ", "）", ")"
+          - Duplicate ids (last value wins, logged as warning)
+          - Extra blank lines
+
         Returns a list of translated strings ordered by id, or None on failure.
         """
+        # Strip code fences
         cleaned = re.sub(r"^```[a-z]*\n?", "", text.strip(), flags=re.MULTILINE)
-        cleaned = re.sub(r"^```$", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"^```\s*$", "", cleaned, flags=re.MULTILINE)
 
         translations_by_id = {}
+        last_valid_idx = None   # track the most recent successfully parsed id
+        skipped_lines = []
+
         for raw_line in cleaned.splitlines():
             line = raw_line.strip()
             if not line:
                 continue
-            parts = line.split("|", 1)
-            if len(parts) != 2:
-                return None
-            line_id, translated_text = parts
-            if not line_id.strip().isdigit():
-                return None
-            idx = int(line_id.strip())
+            m = self._TRANSLATION_LINE_RE.match(line)
+            if not m:
+                # No id on this line — could be a continuation of the previous
+                # translation that the LLM accidentally split across two lines.
+                # If we have a valid previous entry, append rather than discard.
+                if last_valid_idx is not None and last_valid_idx in translations_by_id:
+                    translations_by_id[last_valid_idx] += " " + line
+                    logger.debug(
+                        f"[translation parse] appended split line to id {last_valid_idx}: {line!r}"
+                    )
+                else:
+                    skipped_lines.append(line)
+                continue
+            idx = int(m.group(1))
+            translated_text = m.group(2).strip()
             if idx < 1 or idx > expected_count:
-                return None
-            translations_by_id[idx] = translated_text.strip()
+                logger.debug(
+                    f"[translation parse] id {idx} out of range [1, {expected_count}], skipping: {line!r}"
+                )
+                last_valid_idx = None
+                continue
+            if idx in translations_by_id:
+                logger.debug(
+                    f"[translation parse] duplicate id {idx}, overwriting previous value"
+                )
+            translations_by_id[idx] = translated_text
+            last_valid_idx = idx
+
+        if skipped_lines:
+            logger.debug(
+                f"[translation parse] skipped {len(skipped_lines)} non-matching lines: "
+                + "; ".join(repr(l) for l in skipped_lines[:5])
+                + (" ..." if len(skipped_lines) > 5 else "")
+            )
 
         if len(translations_by_id) != expected_count:
+            logger.debug(
+                f"[translation parse] got {len(translations_by_id)} valid entries, expected {expected_count}"
+            )
             return None
 
         return [translations_by_id[i] for i in range(1, expected_count + 1)]
@@ -498,8 +544,13 @@ class SubtitleBurner:
             response = self.client.simple_chat(prompt, model=self.model)
             translated_texts = self._parse_numbered_translation_lines(response, len(segments))
             if translated_texts is None:
+                # Log the first 800 chars of the raw response so the malformed
+                # content is visible without flooding the log with huge payloads.
+                preview = response[:800].replace("\n", "\\n")
                 logger.warning(
-                    "Translation returned malformed numbered lines; burning original subtitles only."
+                    f"Translation returned malformed numbered lines "
+                    f"(expected {len(segments)} lines); burning original subtitles only. "
+                    f"Raw response preview: {preview!r}"
                 )
                 return None
 
@@ -567,7 +618,7 @@ class SubtitleBurner:
             show_translation,
         )
 
-    def _build_ass_header(self, segments: list, translated: list | None) -> tuple[str, bool]:
+    def _build_ass_header(self, segments: list, translated: list | None, translation_requested: bool = False) -> tuple[str, bool, int]:
         layout, show_translation = self._resolve_ass_layout(translated)
         preset = layout["preset"]
         font_size = layout["font_size"]
@@ -584,11 +635,20 @@ class SubtitleBurner:
         if show_translation:
             original_color = preset.original_color
             original_margin = layout["original_margin"]
-        else:
-            # Preserve the current single-language behavior: one subtitle line
-            # using the translation slot/color for better vertical balance.
+            # Original subtitle is smaller to visually subordinate it to the translation
+            original_font_size = max(24, int(font_size * 0.75))
+        elif not translation_requested:
+            # No translation requested at all: single-track mode, use translation
+            # color/position for better vertical balance (original behavior).
             original_color = preset.translation_color
             original_margin = layout["translation_margin"]
+            original_font_size = font_size
+        else:
+            # Translation was requested but failed: use original styling so the
+            # source-language subtitles don't masquerade as translated content.
+            original_color = preset.original_color
+            original_margin = layout["translation_margin"]
+            original_font_size = font_size
 
         # MarginL/MarginR: leave ~5% of PlayResX on each side so long lines
         # wrap before hitting the screen edge (100px on a 1920-wide canvas ≈ 5%)
@@ -596,7 +656,7 @@ class SubtitleBurner:
 
         original_style = (
             "Style: Original,"
-            f"{font_name},{font_size},{original_color},&H000000FF,"
+            f"{font_name},{original_font_size},{original_color},&H000000FF,"
             f"{outline_color},{back_color},{preset.bold},0,0,0,"
             f"100,100,0,0,{border_style},"
             f"{preset.outline},{shadow},{ASS_ALIGNMENT_BOTTOM_CENTER},{side_margin},{side_margin},{original_margin},1"
@@ -627,24 +687,97 @@ class SubtitleBurner:
                 "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
             ]
         )
-        return header, show_translation
+        return header, show_translation, original_font_size
 
-    def _generate_ass(self, segments: list, translated: list = None) -> str:
-        """Build full ASS file content. Includes translation track if provided."""
-        header, show_translation = self._build_ass_header(segments, translated)
+    @staticmethod
+    def _wrap_ass_text(
+        text: str,
+        font_size: int,
+        play_res_x: int,
+        side_margin: int,
+    ) -> str:
+        """
+        Insert ASS hard line-breaks (\\N) to prevent text from overflowing the
+        screen.  Rather than hardcoding character limits, the limit is derived
+        from the actual available width and font size:
+
+          available_px  = play_res_x - 2 * side_margin
+          CJK char width ≈ font_size * 1.0  (full-width square glyphs)
+          Latin char width ≈ font_size * 0.55 (average for proportional fonts)
+
+        A 0.9 safety factor is applied so text never sits right at the edge.
+        CJK line breaks also apply hanging punctuation: any chunk that starts
+        with a closing punctuation mark has that character merged back onto the
+        previous line to avoid orphaned punctuation on its own line.
+        """
+        # CJK closing/trailing punctuation that must not start a new line
+        _CJK_NO_START = set("，。！？；：、""）】」…—～·")
+
+        available_px = (play_res_x - 2 * side_margin) * 0.9
+
+        if _CJK_RE.search(text):
+            # CJK glyphs are square: width ≈ font_size
+            max_chars = max(1, int(available_px / font_size))
+            chunks = [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+            # Merge any chunk whose first character is a closing punctuation mark
+            # back onto the previous chunk to avoid orphaned punctuation lines.
+            merged: list[str] = []
+            for chunk in chunks:
+                if merged and chunk and chunk[0] in _CJK_NO_START:
+                    merged[-1] = merged[-1] + chunk[0]
+                    rest = chunk[1:]
+                    if rest:
+                        merged.append(rest)
+                else:
+                    merged.append(chunk)
+            return r"\N".join(merged)
+        else:
+            # Latin: proportional, average width ≈ 0.55 * font_size
+            max_chars = max(1, int(available_px / (font_size * 0.55)))
+            words = text.split()
+            wrapped_lines: list[str] = []
+            current = ""
+            for word in words:
+                if current and len(current) + 1 + len(word) > max_chars:
+                    wrapped_lines.append(current)
+                    current = word
+                else:
+                    current = f"{current} {word}".strip()
+            if current:
+                wrapped_lines.append(current)
+            return r"\N".join(wrapped_lines)
+
+    def _generate_ass(self, segments: list, translated: list = None, translation_requested: bool = False) -> str:
+        """Build full ASS file content. Includes translation track if provided.
+
+        translation_requested distinguishes two silent-failure cases:
+          - False: no translation was requested → single-track mode, use translation
+                   color/position for the original (better vertical balance).
+          - True but translated is None: translation was requested but failed →
+                   fall back to single-track but keep original styling so the
+                   English subtitles don't masquerade as translated content.
+        """
+        header, show_translation, original_font_size = self._build_ass_header(
+            segments, translated, translation_requested
+        )
         layout, _ = self._resolve_ass_layout(translated)
         boxed_style = layout["border_style"] == 3
+        font_size = layout["font_size"]
+        side_margin = int(ASS_PLAY_RES_X * 0.05)
         lines = [header]
         for i, seg in enumerate(segments):
             start = self._srt_time_to_ass(seg["start"])
             end = self._srt_time_to_ass(seg["end"])
             text = _SPEAKER_TAG_RE.sub("", seg["text"].replace("\n", " "))
+            # Use original_font_size for wrap calculation so it matches the style's actual font size
+            text = self._wrap_ass_text(text, original_font_size, ASS_PLAY_RES_X, side_margin)
             if boxed_style:
                 text = rf"\h{text}\h"
             lines.append(f"Dialogue: 0,{start},{end},Original,,0,0,0,,{text}")
             if show_translation and translated and i < len(translated):
                 tr_text = _SPEAKER_TAG_RE.sub("", translated[i]["text"].replace("\n", " "))
                 if tr_text:
+                    tr_text = self._wrap_ass_text(tr_text, font_size, ASS_PLAY_RES_X, side_margin)
                     if boxed_style:
                         tr_text = rf"\h{tr_text}\h"
                     lines.append(f"Dialogue: 0,{start},{end},Translation,,0,0,0,,{tr_text}")
