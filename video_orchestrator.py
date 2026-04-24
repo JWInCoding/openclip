@@ -155,7 +155,7 @@ class VideoOrchestrator:
         self.engaging_moments_analyzer = None
         self.insights_analyzer = None
         self.analysis_coordinator = None
-        analysis_capable_without_api_key = self.llm_provider == "custom_openai"
+        analysis_capable_without_api_key = self.llm_provider in ("custom_openai",)
         if not skip_analysis and (api_key or analysis_capable_without_api_key):
             try:
                 if mode == "insights":
@@ -1257,9 +1257,9 @@ Note: Set the API key environment variable for your selected provider when requi
     parser.add_argument('--language', default='zh',
                        choices=['zh', 'en'],
                        help='Language for output (zh: Chinese, en: English, default: zh)')
-    parser.add_argument('--llm-provider', default='qwen',
+    parser.add_argument('--llm-provider', default=DEFAULT_LLM_PROVIDER,
                        choices=list(SUPPORTED_LLM_PROVIDERS),
-                       help='LLM provider to use for engaging moments analysis (default: qwen)')
+                       help=f'LLM provider to use for engaging moments analysis (default: {DEFAULT_LLM_PROVIDER})')
     parser.add_argument('--llm-model',
                        help='Override the LLM model name for the selected provider')
     parser.add_argument('--llm-base-url',

@@ -51,6 +51,12 @@ class EngagingMomentsAnalyzer:
             raise ValueError(
                 "custom_openai requires llm_model. Set CUSTOM_OPENAI_MODEL or provide llm_model."
             )
+        if self.provider == "deepseek" and not (
+            self.model or LLM_CONFIG["deepseek"]["default_model"]
+        ):
+            raise ValueError(
+                "deepseek requires llm_model. Set DEEPSEEK_MODEL or provide llm_model."
+            )
         
         # Initialize the appropriate LLM client
         if self.provider == "qwen":
@@ -65,11 +71,19 @@ class EngagingMomentsAnalyzer:
         elif self.provider == "minimax":
             from core.llm.minimax_api_client import MiniMaxAPIClient
             self.llm_client = MiniMaxAPIClient(api_key, base_url=self.base_url)
+        elif self.provider == "deepseek":
+            import os
+            from core.config import API_KEY_ENV_VARS
+            from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
+            resolved_api_key = api_key or os.getenv(API_KEY_ENV_VARS["deepseek"])
+            resolved_base_url = self.base_url or LLM_CONFIG["deepseek"]["base_url"]
+            self.llm_client = CustomOpenAIAPIClient(resolved_api_key, base_url=resolved_base_url)
+            self.llm_client.default_model = self.model or LLM_CONFIG["deepseek"]["default_model"]
         elif self.provider == "custom_openai":
             from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
             self.llm_client = CustomOpenAIAPIClient(api_key, base_url=self.base_url)
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', 'glm', 'minimax', and 'custom_openai'.")
+            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', 'glm', 'minimax', 'deepseek', and 'custom_openai'.")
         
         # Load background information if enabled
         if self.use_background:
