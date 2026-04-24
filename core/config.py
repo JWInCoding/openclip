@@ -36,6 +36,7 @@ SUPPORTED_LLM_PROVIDERS = (
     "openrouter",
     "glm",
     "minimax",
+    "deepseek",
     "custom_openai",
 )
 
@@ -87,11 +88,21 @@ LLM_CONFIG: Dict[str, Dict[str, Any]] = {
             "stream": False
         }
     },
+    "deepseek": {
+        "base_url": _env_llm_base_url("custom_openai", "https://api.deepseek.com/v1/chat/completions"),
+        "default_model": _env_llm_model("deepseek", "deepseek-v4-flash"),
+        "default_params": {
+            "max_tokens": 32768,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "stream": False
+        }
+    },
     "custom_openai": {
         "base_url": _env_llm_base_url("custom_openai", "https://api.openai.com/v1/chat/completions"),
         "default_model": _env_llm_model("custom_openai", ""),
         "default_params": {
-            "max_tokens": 8192,
+            "max_tokens": 32768,
             "temperature": 0.7,
             "top_p": 0.8,
             "stream": False
@@ -106,12 +117,13 @@ API_KEY_ENV_VARS: Dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
     "glm": "GLM_API_KEY",
     "minimax": "MINIMAX_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY_OPENCLIP",
     "custom_openai": "CUSTOM_OPENAI_API_KEY",
 }
 
 
 # Default LLM provider
-DEFAULT_LLM_PROVIDER: str = "qwen"
+DEFAULT_LLM_PROVIDER: str = "deepseek"
 
 # Video splitting
 MAX_DURATION_MINUTES: float = 20.0
