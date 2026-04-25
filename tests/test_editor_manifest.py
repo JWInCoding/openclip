@@ -8,6 +8,7 @@ from job_manager import JobManager
 
 from core.editor.manifest import (
     build_manifest,
+    discover_manifest_by_project_id,
     load_manifest,
     parse_timecode_to_seconds,
     reconcile_manifest,
@@ -31,6 +32,8 @@ def editor_result(tmp_path):
     original_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
     whisper_srt = clips_dir / "rank_01_test_clip.whisper.srt"
     whisper_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello whisper\n", encoding="utf-8")
+    translated_srt = clips_dir / "rank_01_test_clip.translated.srt"
+    translated_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHola\n", encoding="utf-8")
     composed_clip = post_dir / raw_clip.name
     composed_clip.write_bytes(b"composed")
 
@@ -56,6 +59,7 @@ def editor_result(tmp_path):
                     "filename": raw_clip.name,
                     "subtitle_filename": original_srt.name,
                     "whisper_subtitle_filename": whisper_srt.name,
+                    "translated_subtitle_filename": translated_srt.name,
                     "duration": 15.0,
                     "video_part": "part01",
                     "time_range": "00:00:10 - 00:00:25",
@@ -115,6 +119,7 @@ def test_manifest_build_and_roundtrip_preserves_asset_slots(editor_result):
     assert clip.asset_registry.current_composed_clip.endswith("rank_01_test_clip.mp4")
     assert clip.asset_registry.subtitle_sidecars["original"].endswith("rank_01_test_clip.srt")
     assert clip.asset_registry.subtitle_sidecars["whisper"].endswith("rank_01_test_clip.whisper.srt")
+    assert clip.asset_registry.subtitle_sidecars["translated"].endswith("rank_01_test_clip.translated.srt")
     assert clip.asset_registry.horizontal_cover.endswith("cover_rank_01_test_clip.jpg")
     assert clip.asset_registry.vertical_cover.endswith("cover_rank_01_test_clip_vertical.jpg")
     assert clip.part_offset_seconds == 60.0
@@ -145,6 +150,60 @@ def test_manifest_build_and_roundtrip_preserves_asset_slots(editor_result):
     second_manifest = load_manifest(second_path)
     assert second_manifest.project_id == manifest.project_id
     assert second_manifest.clips[0].clip_id == clip.clip_id
+
+
+def test_manifest_roundtrip_preserves_translated_subtitle_sidecar(tmp_path):
+    manifest = EditorManifest(
+        project_id="project-1",
+        schema_version=1,
+        source_video_title="Sample",
+        source_video_path="/tmp/source.mp4",
+        source_video_duration=120.0,
+        project_root=str(tmp_path / "processed_videos" / "sample"),
+        created_at=utc_now_iso(),
+        updated_at=utc_now_iso(),
+        clips=[
+            EditorClip(
+                clip_id="clip-1",
+                rank=1,
+                title="Clip",
+                video_part="part01",
+                source_video_path="/tmp/source.mp4",
+                source_video_duration=120.0,
+                part_offset_seconds=0.0,
+                part_duration_seconds=30.0,
+                start_time="00:00:10",
+                end_time="00:00:20",
+                absolute_start_time="00:00:10",
+                absolute_end_time="00:00:20",
+                original_start_time="00:00:10",
+                original_end_time="00:00:20",
+                duration=10.0,
+                time_range="00:00:10 - 00:00:20",
+                original_time_range="00:00:10 - 00:00:20",
+                absolute_time_range="00:00:10 - 00:00:20",
+                asset_registry=EditorAssetRegistry(
+                    raw_clip="/tmp/raw.mp4",
+                    current_composed_clip="/tmp/current.mp4",
+                    subtitle_sidecars={
+                        "original": "/tmp/original.srt",
+                        "translated": "/tmp/translated.srt",
+                        "active": "/tmp/original.srt",
+                    },
+                ),
+                title_recipe=TitleRecipe(text="Clip", style="gradient_3d", font_size=40),
+                subtitle_recipe=SubtitleRecipe(),
+                cover_recipe=CoverRecipe(text="Clip"),
+                recovery=EditorRecoveryState(),
+            ),
+        ],
+    )
+    manifest_path = tmp_path / "editor_project.json"
+    save_manifest(manifest, manifest_path)
+
+    loaded = load_manifest(manifest_path)
+
+    assert loaded.clips[0].asset_registry.subtitle_translated == "/tmp/translated.srt"
 
 
 def test_manifest_upsert_treats_changed_clip_identity_as_new_clip(editor_result):
@@ -202,6 +261,28 @@ def test_manifest_upsert_treats_changed_clip_identity_as_new_clip(editor_result)
     assert refreshed_clip.start_time == "00:00:30"
     assert refreshed_clip.end_time == "00:00:44"
     assert refreshed_clip.asset_registry.raw_clip.endswith("rank_01_different_clip.mp4")
+
+
+def test_discover_manifest_by_project_id_prefers_latest_duplicate(tmp_path):
+    projects_root = tmp_path / "processed_videos"
+    older_root = projects_root / "sample_0"
+    newer_root = projects_root / "sample"
+    older_root.mkdir(parents=True)
+    newer_root.mkdir(parents=True)
+
+    older = {
+        "project_id": "duplicate-project",
+        "updated_at": "2026-04-24T09:00:00+00:00",
+    }
+    newer = {
+        "project_id": "duplicate-project",
+        "updated_at": "2026-04-24T14:00:00+00:00",
+    }
+    (older_root / "editor_project.json").write_text(json.dumps(older), encoding="utf-8")
+    newer_path = newer_root / "editor_project.json"
+    newer_path.write_text(json.dumps(newer), encoding="utf-8")
+
+    assert discover_manifest_by_project_id(projects_root, "duplicate-project") == newer_path
 
 
 @pytest.mark.parametrize(

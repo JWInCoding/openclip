@@ -55,14 +55,18 @@ def save_manifest(manifest: EditorManifest, path: str | Path | None = None) -> P
 
 
 def discover_manifest_by_project_id(output_dir: str | Path, project_id: str) -> Optional[Path]:
+    matches: list[tuple[str, Path]] = []
     for path in Path(output_dir).rglob(MANIFEST_FILENAME):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
         if data.get("project_id") == project_id:
-            return path
-    return None
+            matches.append((str(data.get("updated_at") or data.get("created_at") or ""), path))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
+    return matches[0][1]
 
 
 def list_manifest_paths(output_dir: str | Path) -> list[Path]:
@@ -253,6 +257,7 @@ def build_manifest(
         raw_clip_path = str((clip_output_dir / raw_filename).resolve()) if raw_filename else None
         subtitle_filename = clip.get("subtitle_filename")
         whisper_subtitle_filename = clip.get("whisper_subtitle_filename")
+        translated_subtitle_filename = clip.get("translated_subtitle_filename")
         title_text = clip.get("title", f"Clip {rank}")
         start_time, end_time = _extract_time_range_parts(clip.get("time_range"))
         original_start, original_end = _extract_time_range_parts(clip.get("original_time_range"))
@@ -274,6 +279,8 @@ def build_manifest(
             subtitle_sidecars["original"] = str((clip_output_dir / subtitle_filename).resolve())
         if whisper_subtitle_filename:
             subtitle_sidecars["whisper"] = str((clip_output_dir / whisper_subtitle_filename).resolve())
+        if translated_subtitle_filename:
+            subtitle_sidecars["translated"] = str((clip_output_dir / translated_subtitle_filename).resolve())
         subtitle_sidecars["active"] = subtitle_sidecars.get("whisper") or subtitle_sidecars.get("original")
         if existing_clip:
             subtitle_sidecars = {**existing_clip.asset_registry.subtitle_sidecars, **subtitle_sidecars}

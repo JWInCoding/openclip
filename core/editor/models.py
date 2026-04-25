@@ -92,6 +92,10 @@ class EditorAssetRegistry:
         return self.subtitle_sidecars.get("whisper")
 
     @property
+    def subtitle_translated(self) -> Optional[str]:
+        return self.subtitle_sidecars.get("translated")
+
+    @property
     def subtitle_active(self) -> Optional[str]:
         return self.subtitle_sidecars.get("active") or self.subtitle_whisper or self.subtitle_original
 
@@ -104,6 +108,8 @@ class EditorAssetRegistry:
                 subtitle_sidecars["original"] = payload["subtitle_original"]
             if payload.get("subtitle_whisper"):
                 subtitle_sidecars["whisper"] = payload["subtitle_whisper"]
+            if payload.get("subtitle_translated"):
+                subtitle_sidecars["translated"] = payload["subtitle_translated"]
             if payload.get("subtitle_active"):
                 subtitle_sidecars["active"] = payload["subtitle_active"]
         return cls(
@@ -125,6 +131,7 @@ class EditorAssetRegistry:
         # Keep legacy flat fields for older readers.
         data["subtitle_original"] = self.subtitle_original
         data["subtitle_whisper"] = self.subtitle_whisper
+        data["subtitle_translated"] = self.subtitle_translated
         data["subtitle_active"] = self.subtitle_active
         return data
 

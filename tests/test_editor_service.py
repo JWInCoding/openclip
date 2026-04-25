@@ -123,6 +123,19 @@ def test_editor_service_load_update_and_rerender_contract(tmp_path):
     assert saved_clip.recovery.pending_operation == "subtitles"
 
 
+def test_editor_service_resolves_repo_relative_media_paths_against_projects_root(tmp_path):
+    projects_root = tmp_path / "processed_videos"
+    source_path = projects_root / "sample" / "local_videos" / "source.mp4"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"video")
+
+    service = EditorService(projects_root=projects_root, jobs_dir=tmp_path / "jobs")
+
+    resolved = service._resolve_media_path("processed_videos/sample/local_videos/source.mp4")
+
+    assert resolved == source_path
+
+
 
 def test_editor_service_fastapi_routes(tmp_path):
     manifest, projects_root, jobs_dir = _create_project(tmp_path)
@@ -171,6 +184,164 @@ def test_editor_service_fastapi_routes(tmp_path):
     assert subtitle.json()["subtitle_segments"][0]["text"] == "First cue"
     assert subtitle.json()["subtitle_segments"][1]["text"] == "Second cue"
 
+
+def test_update_clip_translated_subtitles_writes_sidecar_and_serializes_track(tmp_path):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    manifest_path = Path(manifest.project_root) / "editor_project.json"
+    clip = manifest.clips[0]
+    clip.subtitle_recipe.translation = "Simplified Chinese"
+    save_manifest(manifest, manifest_path)
+
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+    updated_clip = service.update_clip_translated_subtitles(
+        manifest.project_id,
+        clip.clip_id,
+        subtitle_segments=[
+            {"start_time": "00:00:00,000", "end_time": "00:00:01,000", "text": "你好"},
+        ],
+    )
+
+    translated_path = Path(updated_clip["asset_registry"]["subtitle_sidecars"]["translated"])
+    assert translated_path.exists()
+    assert "你好" in translated_path.read_text(encoding="utf-8")
+    assert updated_clip["has_translated_subtitles"] is True
+    assert updated_clip["translated_subtitle_segments"][0]["text"] == "你好"
+
+
+def test_subtitle_worker_reuses_existing_translated_sidecar_without_llm(tmp_path, monkeypatch):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    manifest_path = Path(manifest.project_root) / "editor_project.json"
+    clip = manifest.clips[0]
+    clip.metadata["title_overlay_enabled"] = False
+    clip.subtitle_recipe.translation = "Simplified Chinese"
+    translated_path = Path(manifest.project_root) / "editor_overrides" / f"{clip.clip_id}.translated.srt"
+    translated_path.parent.mkdir(parents=True, exist_ok=True)
+    translated_path.write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\n", encoding="utf-8")
+    clip.asset_registry.subtitle_sidecars["translated"] = str(translated_path)
+    save_manifest(manifest, manifest_path)
+
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+    calls = {"translated_srt_path": None, "translated_output_path": None}
+
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None, translated_srt_path=None, translated_output_path=None):
+        calls["translated_srt_path"] = str(translated_srt_path) if translated_srt_path else None
+        calls["translated_output_path"] = str(translated_output_path) if translated_output_path else None
+        Path(output).write_bytes(b"composed-updated")
+        return True
+
+    monkeypatch.setattr("core.subtitle_burner.SubtitleBurner._process_clip", fake_process_clip, raising=False)
+
+    service._subtitle_worker(manifest_path, clip.clip_id, None, lambda *_args: None)
+
+    assert calls["translated_srt_path"] == str(translated_path)
+    assert calls["translated_output_path"] is None
+
+
+def test_subtitle_worker_generates_initial_translated_sidecar_when_missing(tmp_path, monkeypatch):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    manifest_path = Path(manifest.project_root) / "editor_project.json"
+    clip = manifest.clips[0]
+    clip.metadata["title_overlay_enabled"] = False
+    clip.subtitle_recipe.translation = "Simplified Chinese"
+    save_manifest(manifest, manifest_path)
+
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+    calls = {"translated_output_path": None}
+
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None, translated_srt_path=None, translated_output_path=None):
+        calls["translated_output_path"] = str(translated_output_path) if translated_output_path else None
+        if translated_output_path:
+            Path(translated_output_path).write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\n", encoding="utf-8")
+        Path(output).write_bytes(b"composed-updated")
+        return True
+
+    monkeypatch.setattr("core.subtitle_burner.SubtitleBurner._process_clip", fake_process_clip, raising=False)
+
+    service._subtitle_worker(manifest_path, clip.clip_id, None, lambda *_args: None)
+
+    saved_manifest = load_manifest(manifest_path)
+    saved_clip = saved_manifest.clip_by_id(clip.clip_id)
+    assert calls["translated_output_path"] is not None
+    assert saved_clip.asset_registry.subtitle_translated is not None
+    assert Path(saved_clip.asset_registry.subtitle_translated).exists()
+
+
+def test_build_subtitle_burner_enables_llm_for_translation_bootstrap_when_api_key_exists(tmp_path, monkeypatch):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    clip = manifest.clips[0]
+    clip.subtitle_recipe.translation = "Simplified Chinese"
+    monkeypatch.setenv("QWEN_API_KEY", "test-qwen-key")
+
+    captured_kwargs = {}
+
+    def fake_init(self, **kwargs):
+        captured_kwargs.update(kwargs)
+        self.client = object() if kwargs.get("enable_llm") else None
+
+    monkeypatch.setattr("core.editor.service.SubtitleBurner.__init__", fake_init)
+
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+    burner = service._build_subtitle_burner(clip, bootstrap_translation=True)
+
+    assert burner.client is not None
+    assert captured_kwargs["enable_llm"] is True
+    assert captured_kwargs["provider"] == "qwen"
+
+
+def test_boundary_worker_remaps_translated_sidecar_to_refreshed_timings(tmp_path, monkeypatch):
+    manifest, projects_root, jobs_dir = _create_project(tmp_path)
+    manifest_path = Path(manifest.project_root) / "editor_project.json"
+    clip = manifest.clips[0]
+    clip.metadata["title_overlay_enabled"] = False
+    clip.subtitle_recipe.translation = "Simplified Chinese"
+    clip.asset_registry.subtitle_sidecars["active"] = clip.asset_registry.subtitle_sidecars["original"]
+    translated_path = Path(manifest.project_root) / "editor_overrides" / f"{clip.clip_id}.translated.srt"
+    translated_path.parent.mkdir(parents=True, exist_ok=True)
+    translated_path.write_text(
+        "\n\n".join(
+            [
+                "1\n00:00:00,000 --> 00:00:01,000\n第一行",
+                "2\n00:00:01,000 --> 00:00:02,000\n第二行",
+            ]
+        ) + "\n",
+        encoding="utf-8",
+    )
+    clip.asset_registry.subtitle_sidecars["translated"] = str(translated_path)
+    save_manifest(manifest, manifest_path)
+
+    service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
+
+    def fake_create_clip(self, source_video_path, start_time, end_time, output_path, title, speed=1.0):
+        Path(output_path).write_bytes(b"raw-updated")
+        return True
+
+    def fake_extract_subtitle(self, subtitle_path, start_time, end_time, output_path, speed=1.0):
+        Path(output_path).write_text(
+            "\n\n".join(
+                [
+                    "1\n00:00:00,000 --> 00:00:01,200\nDerived one",
+                    "2\n00:00:01,200 --> 00:00:02,400\nDerived two",
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+        return True
+
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None, translated_srt_path=None, translated_output_path=None):
+        Path(output).write_bytes(b"composed-updated")
+        return True
+
+    monkeypatch.setattr("core.clip_generator.ClipGenerator._create_clip", fake_create_clip, raising=False)
+    monkeypatch.setattr("core.clip_generator.ClipGenerator._extract_subtitle_from_file", fake_extract_subtitle, raising=False)
+    monkeypatch.setattr("core.subtitle_burner.SubtitleBurner._process_clip", fake_process_clip, raising=False)
+
+    service._boundary_worker(manifest_path, clip.clip_id, None, lambda *_args: None)
+
+    remapped_text = translated_path.read_text(encoding="utf-8")
+    assert "00:00:00,000 --> 00:00:01,200" in remapped_text
+    assert "00:00:01,200 --> 00:00:02,400" in remapped_text
+    assert "第一行" in remapped_text
+    assert "第二行" in remapped_text
 
 def test_editor_spa_html_is_not_cached(tmp_path):
     manifest, projects_root, jobs_dir = _create_project(tmp_path)
@@ -229,7 +400,7 @@ def test_subtitle_worker_preserves_original_generation_behavior_without_titles(t
     service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
     calls = {'subtitle_only': 0, 'title_overlay': 0}
 
-    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None):
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None, **kwargs):
         calls['subtitle_only'] += 1
         Path(output).write_bytes(b'subtitle-only')
         return True
@@ -263,7 +434,7 @@ def test_subtitle_worker_writes_override_segments_with_original_timings(tmp_path
     service = EditorService(projects_root=projects_root, jobs_dir=jobs_dir)
     calls = {'subtitle_path': None, 'subtitle_content': None}
 
-    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None):
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None, **kwargs):
         calls['subtitle_path'] = str(srt)
         calls['subtitle_content'] = Path(srt).read_text(encoding='utf-8')
         Path(output).write_bytes(b'composed-updated')
@@ -336,7 +507,7 @@ def test_boundary_worker_refreshes_post_processed_clip_when_subtitles_are_derive
         Path(output_path).write_text("1\n00:00:00,000 --> 00:00:01,000\nDerived\n", encoding='utf-8')
         return True
 
-    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None):
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None, **kwargs):
         calls['subtitle_only'] += 1
         Path(output).write_bytes(b'composed-updated')
         return True
@@ -374,7 +545,7 @@ def test_boundary_worker_keeps_manual_override_on_raw_clip_until_subtitle_rerend
         Path(output_path).write_bytes(b'raw-updated')
         return True
 
-    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None):
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None, **kwargs):
         calls['subtitle_only'] += 1
         Path(output).write_bytes(b'composed-updated')
         return True
@@ -415,7 +586,7 @@ def test_boundary_worker_uses_selected_speed_for_raw_clip_and_subtitle_sidecars(
         Path(output_path).write_text("1\n00:00:00,000 --> 00:00:00,500\nDerived\n", encoding='utf-8')
         return True
 
-    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None):
+    def fake_process_clip(self, mp4, srt, output, subtitle_translation=None, **kwargs):
         Path(output).write_bytes(b'composed-updated')
         return True
 

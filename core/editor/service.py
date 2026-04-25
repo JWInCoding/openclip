@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.clip_generator import ClipGenerator
+from core.config import API_KEY_ENV_VARS, DEFAULT_LLM_PROVIDER
 from core.cover_image_generator import COVER_COLORS, CoverImageGenerator
 from core.editor.manifest import (
     discover_manifest_by_project_id,
@@ -195,6 +197,46 @@ def _derive_subtitle_text_for_bounds(clip: EditorClip) -> str:
     return _subtitle_segments_to_text(_effective_subtitle_segments_for_clip(clip))
 
 
+def _remap_text_segments_onto_timings(
+    text_segments: list[dict[str, str]],
+    timed_segments: list[dict[str, str]],
+    *,
+    fill_from_timed_segments: bool = False,
+) -> list[dict[str, str]]:
+    if not timed_segments:
+        return []
+
+    remapped_segments: list[dict[str, str]] = []
+    for index, segment in enumerate(timed_segments, start=1):
+        if index - 1 < len(text_segments):
+            text = str(text_segments[index - 1].get("text", "")).strip()
+        elif fill_from_timed_segments:
+            text = str(segment.get("text", "")).strip()
+        else:
+            text = ""
+        remapped_segments.append(
+            {
+                "index": index,
+                "start_time": segment["start_time"],
+                "end_time": segment["end_time"],
+                "text": text,
+            }
+        )
+
+    if len(text_segments) > len(remapped_segments):
+        overflow = "\n".join(
+            str(segment.get("text", "")).strip()
+            for segment in text_segments[len(remapped_segments):]
+            if str(segment.get("text", "")).strip()
+        ).strip()
+        if overflow:
+            remapped_segments[-1]["text"] = "\n".join(
+                part for part in [remapped_segments[-1]["text"], overflow] if part
+            ).strip()
+
+    return remapped_segments
+
+
 def _resolve_cover_color(value: Any, fallback_name: str) -> Any:
     if isinstance(value, (list, tuple)) and len(value) == 3:
         return tuple(int(channel) for channel in value)
@@ -243,14 +285,22 @@ class EditorService:
         manifest.updated_at = utc_now_iso()
         save_manifest(manifest, manifest_path)
 
-    @staticmethod
-    def _resolve_media_path(path: str | None) -> Path | None:
+    def _resolve_media_path(self, path: str | None) -> Path | None:
         if not path:
             return None
         candidate = Path(path)
-        if not candidate.exists():
-            return None
-        return candidate
+        candidates = [candidate]
+        if not candidate.is_absolute():
+            candidates.extend(
+                [
+                    self.projects_root.parent / candidate,
+                    self.projects_root / candidate,
+                ]
+            )
+        for media_path in candidates:
+            if media_path.exists():
+                return media_path
+        return None
 
     def _project_media_url(self, project_id: str, media_kind: str) -> str:
         return f"/api/projects/{project_id}/media/{media_kind}"
@@ -261,9 +311,13 @@ class EditorService:
     def _serialize_clip(self, clip: EditorClip) -> dict[str, Any]:
         payload = clip.to_dict()
         subtitle_segments = _effective_subtitle_segments_for_clip(clip)
+        translated_subtitle_segments = _parse_subtitle_segments_from_path(clip.asset_registry.subtitle_translated)
         payload["active_subtitle_path"] = clip.asset_registry.subtitle_active
         payload["subtitle_segments"] = subtitle_segments
         payload["effective_subtitle_text"] = _subtitle_segments_to_text(subtitle_segments)
+        payload["translated_subtitle_segments"] = translated_subtitle_segments
+        payload["translated_subtitle_text"] = _subtitle_segments_to_text(translated_subtitle_segments)
+        payload["has_translated_subtitles"] = bool(translated_subtitle_segments)
         payload["has_manual_subtitle_override"] = clip.subtitle_recipe.has_override
         payload["recovery_state"] = clip.recovery.recovery_state
         payload["last_error"] = clip.recovery.last_error
@@ -374,6 +428,35 @@ class EditorService:
         self._save_manifest(manifest, manifest_path)
         return self._serialize_clip(clip)
 
+    def update_clip_translated_subtitles(
+        self,
+        project_id: str,
+        clip_id: str,
+        subtitle_text: str = "",
+        subtitle_segments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        manifest, manifest_path = self._load_manifest(project_id)
+        clip = manifest.clip_by_id(clip_id)
+        normalized_segments = _serialize_subtitle_segments(subtitle_segments or [])
+        if normalized_segments:
+            translated_segments = normalized_segments
+        else:
+            translated_segments = _remap_text_segments_onto_timings(
+                [{"text": line.strip()} for line in str(subtitle_text or "").splitlines() if line.strip()],
+                _effective_subtitle_segments_for_clip(clip),
+                fill_from_timed_segments=False,
+            )
+        translated_path = self._translated_subtitle_path(manifest, clip)
+        translated_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_subtitle_segments(translated_path, translated_segments)
+        clip.asset_registry.subtitle_sidecars["translated"] = str(translated_path)
+        clip.recovery.dirty = True
+        clip.recovery.recovery_state = "dirty"
+        clip.recovery.last_error = None
+        clip.updated_at = utc_now_iso()
+        self._save_manifest(manifest, manifest_path)
+        return self._serialize_clip(clip)
+
     def update_cover_title(self, project_id: str, clip_id: str, title_text: str) -> dict[str, Any]:
         manifest, manifest_path = self._load_manifest(project_id)
         clip = manifest.clip_by_id(clip_id)
@@ -439,6 +522,41 @@ class EditorService:
         self.job_manager.start_job(job_id, lambda job, progress: worker(manifest_path, clip_id, job, progress))
         return {"job_id": job_id, "project_id": project_id, "clip_id": clip_id, "operation": operation, "status": "pending"}
 
+    @staticmethod
+    def _translated_subtitle_path(manifest: EditorManifest, clip: EditorClip) -> Path:
+        override_dir = Path(manifest.project_root) / "editor_overrides"
+        return override_dir / f"{clip.clip_id}.translated.srt"
+
+    def _build_subtitle_burner(self, clip: EditorClip, *, bootstrap_translation: bool) -> SubtitleBurner:
+        burner_kwargs: dict[str, Any] = {
+            "subtitle_style_config": SubtitleStyleConfig(
+                preset=clip.subtitle_recipe.style_preset,
+                font_size=clip.subtitle_recipe.style_font_size,
+                vertical_position=clip.subtitle_recipe.style_vertical_position,
+                bilingual_layout=clip.subtitle_recipe.style_bilingual_layout,
+                background_style=clip.subtitle_recipe.style_background_style,
+            )
+        }
+        if bootstrap_translation and clip.subtitle_recipe.translation:
+            provider = DEFAULT_LLM_PROVIDER
+            api_key_env_var = API_KEY_ENV_VARS.get(provider)
+            api_key = os.getenv(api_key_env_var) if api_key_env_var else None
+            if api_key or provider == "custom_openai":
+                burner_kwargs.update(
+                    {
+                        "enable_llm": True,
+                        "provider": provider,
+                        "api_key": api_key,
+                    }
+                )
+            else:
+                logger.warning(
+                    "Skipping translated subtitle bootstrap for clip %s: missing %s.",
+                    clip.clip_id,
+                    api_key_env_var,
+                )
+        return SubtitleBurner(**burner_kwargs)
+
     def _boundary_worker(self, manifest_path: Path, clip_id: str, _job, progress_callback) -> dict[str, Any]:
         manifest = load_manifest(manifest_path)
         clip = manifest.clip_by_id(clip_id)
@@ -482,6 +600,20 @@ class EditorService:
                 ):
                     subtitle_sidecars["whisper"] = str(whisper_target)
             subtitle_sidecars["active"] = subtitle_sidecars.get("whisper") or subtitle_sidecars.get("original")
+        translated_path = subtitle_sidecars.get("translated")
+        if translated_path and subtitle_sidecars.get("active"):
+            translated_segments = _parse_subtitle_segments_from_path(translated_path)
+            refreshed_segments = _parse_subtitle_segments_from_path(subtitle_sidecars.get("active"))
+            if translated_segments and refreshed_segments:
+                remapped_translated_segments = _remap_text_segments_onto_timings(
+                    translated_segments,
+                    refreshed_segments,
+                    fill_from_timed_segments=False,
+                )
+                translated_target = Path(translated_path)
+                translated_target.parent.mkdir(parents=True, exist_ok=True)
+                _write_subtitle_segments(translated_target, remapped_translated_segments)
+                subtitle_sidecars["translated"] = str(translated_target)
         clip.asset_registry.raw_clip = str(raw_clip_path)
         clip.asset_registry.subtitle_sidecars = subtitle_sidecars
         should_refresh_composed_clip = not clip.subtitle_recipe.has_override
@@ -529,6 +661,7 @@ class EditorService:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / raw_clip_path.name
         subtitle_path = Path(clip.asset_registry.subtitle_active or raw_clip_path.with_suffix('.srt'))
+        translated_sidecar_path = None
         override_segments = _serialize_subtitle_segments(clip.subtitle_recipe.override_segments)
         if override_segments:
             override_dir = Path(manifest.project_root) / "editor_overrides"
@@ -544,20 +677,29 @@ class EditorService:
             _write_subtitle_segments(subtitle_path, _legacy_override_segments_for_clip(clip))
             clip.asset_registry.subtitle_sidecars["override"] = str(subtitle_path)
             clip.asset_registry.subtitle_sidecars["active"] = str(subtitle_path)
-        burner = SubtitleBurner(
-            subtitle_style_config=SubtitleStyleConfig(
-                preset=clip.subtitle_recipe.style_preset,
-                font_size=clip.subtitle_recipe.style_font_size,
-                vertical_position=clip.subtitle_recipe.style_vertical_position,
-                bilingual_layout=clip.subtitle_recipe.style_bilingual_layout,
-                background_style=clip.subtitle_recipe.style_background_style,
-            )
+        translated_sidecar = clip.asset_registry.subtitle_sidecars.get("translated")
+        if translated_sidecar and Path(translated_sidecar).exists():
+            translated_sidecar_path = Path(translated_sidecar)
+        elif clip.subtitle_recipe.translation:
+            translated_sidecar_path = self._translated_subtitle_path(manifest, clip)
+            translated_sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        should_bootstrap_translation = bool(
+            clip.subtitle_recipe.translation
+            and translated_sidecar_path
+            and not translated_sidecar_path.exists()
         )
+        burner = self._build_subtitle_burner(clip, bootstrap_translation=should_bootstrap_translation)
         title_overlay_enabled = bool(clip.metadata.get("title_overlay_enabled"))
         if title_overlay_enabled:
             ass_path = output_dir / f"{clip.clip_id}.ass"
             progress_callback("Preparing subtitle overlay", prepare_progress)
-            burner.prepare_ass_for_clip(subtitle_path, ass_path, subtitle_translation=clip.subtitle_recipe.translation)
+            burner.prepare_ass_for_clip(
+                subtitle_path,
+                ass_path,
+                subtitle_translation=clip.subtitle_recipe.translation,
+                translated_srt_path=translated_sidecar_path if translated_sidecar_path and translated_sidecar_path.exists() else None,
+                translated_output_path=translated_sidecar_path if translated_sidecar_path and not translated_sidecar_path.exists() else None,
+            )
             progress_callback("Compositing title and subtitle", render_progress)
             adder = TitleAdder(output_dir=str(output_dir), language='zh')
             if not adder._add_artistic_title(
@@ -572,8 +714,17 @@ class EditorService:
             ass_path.unlink(missing_ok=True)
         else:
             progress_callback("Burning subtitles", render_progress)
-            if not burner._process_clip(raw_clip_path, subtitle_path, output_path, clip.subtitle_recipe.translation):
+            if not burner._process_clip(
+                raw_clip_path,
+                subtitle_path,
+                output_path,
+                clip.subtitle_recipe.translation,
+                translated_srt_path=translated_sidecar_path if translated_sidecar_path and translated_sidecar_path.exists() else None,
+                translated_output_path=translated_sidecar_path if translated_sidecar_path and not translated_sidecar_path.exists() else None,
+            ):
                 raise RuntimeError("Failed to burn subtitle-only output")
+        if translated_sidecar_path and translated_sidecar_path.exists():
+            clip.asset_registry.subtitle_sidecars["translated"] = str(translated_sidecar_path)
         clip.asset_registry.current_composed_clip = str(output_path)
         return str(output_path)
 
@@ -756,6 +907,18 @@ def create_app(projects_root: str | Path = "processed_videos", jobs_dir: str | P
     def update_subtitle_override(project_id: str, clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         try:
             return service.update_clip_subtitles(
+                project_id,
+                clip_id,
+                payload.get('subtitle_text', ''),
+                payload.get('subtitle_segments'),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    @app.patch('/api/projects/{project_id}/clips/{clip_id}/translated-subtitle')
+    def update_translated_subtitle(project_id: str, clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            return service.update_clip_translated_subtitles(
                 project_id,
                 clip_id,
                 payload.get('subtitle_text', ''),
