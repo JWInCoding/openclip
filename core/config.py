@@ -31,6 +31,20 @@ def _env_llm_model(provider: str, default: str) -> str:
     return os.getenv(f"{provider.upper()}_MODEL", default)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 SUPPORTED_LLM_PROVIDERS = (
     "qwen",
     "openrouter",
@@ -139,6 +153,16 @@ DEFAULT_TITLE_STYLE: str = "fire_flame"
 
 # Maximum number of highlight clips to generate
 MAX_CLIPS: int = 5
+
+# Subtitle translation post-processing
+SUBTITLE_TRANSLATION_MAX_WORKERS: int = max(
+    1,
+    _env_int("SUBTITLE_TRANSLATION_MAX_WORKERS", 3),
+)
+SUBTITLE_TRANSLATION_LAUNCH_STAGGER_SECONDS: float = max(
+    0.0,
+    _env_float("SUBTITLE_TRANSLATION_LAUNCH_STAGGER_SECONDS", 0.25),
+)
 
 # Skip download by default (use existing files if available)
 SKIP_DOWNLOAD: bool = False

@@ -20,17 +20,25 @@ Usage (standalone):
     )
 """
 
+import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 from PIL import Image, ImageDraw
 
-from core.config import API_KEY_ENV_VARS
+from core.config import (
+    API_KEY_ENV_VARS,
+    SUBTITLE_TRANSLATION_LAUNCH_STAGGER_SECONDS,
+    SUBTITLE_TRANSLATION_MAX_WORKERS,
+)
 from core.font_utils import build_missing_font_message, find_best_font
 
 logger = logging.getLogger(__name__)
@@ -163,6 +171,21 @@ class SubtitleStyleConfig:
         }
 
 
+@dataclass(frozen=True)
+class SubtitlePreparationJob:
+    mp4: Path
+    srt: Path
+    ass_path: Path
+    translated_srt_path: Path | None = None
+    translated_output_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class SubtitlePreparationResult:
+    job: SubtitlePreparationJob
+    ok: bool
+
+
 class SubtitleBurner:
     """Burn SRT subtitles into video clips, with optional LLM-powered translation."""
 
@@ -174,9 +197,16 @@ class SubtitleBurner:
         base_url: str = None,
         enable_llm: bool = False,
         subtitle_style_config: SubtitleStyleConfig | None = None,
+        subtitle_translation_max_workers: int = SUBTITLE_TRANSLATION_MAX_WORKERS,
+        subtitle_translation_launch_stagger_seconds: float = SUBTITLE_TRANSLATION_LAUNCH_STAGGER_SECONDS,
     ):
         self.model = model  # None → each client uses its config default
         self.subtitle_style_config = (subtitle_style_config or SubtitleStyleConfig()).normalized()
+        self.subtitle_translation_max_workers = max(1, int(subtitle_translation_max_workers))
+        self.subtitle_translation_launch_stagger_seconds = max(
+            0.0,
+            float(subtitle_translation_launch_stagger_seconds),
+        )
         if enable_llm:
             provider = provider.lower()
             if provider == "openrouter":
@@ -286,6 +316,7 @@ class SubtitleBurner:
             mp4_files = sorted(clips_dir.glob("*.mp4"))
 
         processed_clips = []
+        jobs = []
         total = 0
         for mp4 in mp4_files:
             srt = self.preferred_subtitle_path_for_clip(mp4)
@@ -295,12 +326,48 @@ class SubtitleBurner:
             total += 1
             subtitle_source = "whisper" if srt.name.endswith(".whisper.srt") else "original"
             logger.info(f"  Burning subtitles: {mp4.name} ({subtitle_source})")
-            ok = self._process_clip(
-                mp4, srt, output_dir / mp4.name, subtitle_translation
+            jobs.append(
+                SubtitlePreparationJob(
+                    mp4=mp4,
+                    srt=srt,
+                    ass_path=(output_dir / mp4.name).with_suffix(".ass"),
+                    translated_output_path=(
+                        mp4.with_suffix(".translated.srt")
+                        if subtitle_translation and self.client
+                        else None
+                    ),
+                )
             )
-            if ok:
-                title = (clip_titles or {}).get(mp4.name) or mp4.stem.replace("_", " ")
-                processed_clips.append({"filename": mp4.name, "title": title})
+
+        if self._should_prepare_translations_in_parallel(subtitle_translation):
+            preparation_results = self.prepare_ass_for_clips(jobs, subtitle_translation)
+            for result in preparation_results:
+                job = result.job
+                output = output_dir / job.mp4.name
+                try:
+                    if result.ok and self._burn_ass(job.mp4, job.ass_path, output):
+                        title = (clip_titles or {}).get(job.mp4.name) or job.mp4.stem.replace("_", " ")
+                        processed = {"filename": job.mp4.name, "title": title}
+                        if job.translated_output_path and Path(job.translated_output_path).exists():
+                            processed["translated_subtitle_filename"] = Path(job.translated_output_path).name
+                        processed_clips.append(processed)
+                finally:
+                    job.ass_path.unlink(missing_ok=True)
+        else:
+            for job in jobs:
+                ok = self._process_clip(
+                    job.mp4,
+                    job.srt,
+                    output_dir / job.mp4.name,
+                    subtitle_translation,
+                    translated_output_path=job.translated_output_path,
+                )
+                if ok:
+                    title = (clip_titles or {}).get(job.mp4.name) or job.mp4.stem.replace("_", " ")
+                    processed = {"filename": job.mp4.name, "title": title}
+                    if job.translated_output_path and Path(job.translated_output_path).exists():
+                        processed["translated_subtitle_filename"] = Path(job.translated_output_path).name
+                    processed_clips.append(processed)
 
         successful = len(processed_clips)
         logger.info(f"  Subtitle burning complete: {successful}/{total} clips")
@@ -321,8 +388,120 @@ class SubtitleBurner:
             return whisper_srt
         return mp4.with_suffix(".srt")
 
+    def _should_prepare_translations_in_parallel(self, subtitle_translation: str | None) -> bool:
+        return bool(
+            subtitle_translation
+            and self.client
+            and self.subtitle_translation_max_workers > 1
+        )
+
+    def _prepare_ass_job(
+        self,
+        job: SubtitlePreparationJob,
+        subtitle_translation: str | None,
+    ) -> SubtitlePreparationResult:
+        try:
+            job.ass_path.parent.mkdir(parents=True, exist_ok=True)
+            ok = self.prepare_ass_for_clip(
+                job.srt,
+                job.ass_path,
+                subtitle_translation,
+                translated_srt_path=job.translated_srt_path,
+                translated_output_path=job.translated_output_path,
+            )
+            return SubtitlePreparationResult(job=job, ok=ok)
+        except Exception as exc:
+            logger.warning(f"  Failed to prepare subtitles for {job.mp4.name}: {exc}")
+            return SubtitlePreparationResult(job=job, ok=False)
+
+    def prepare_ass_for_clips(
+        self,
+        jobs: list[SubtitlePreparationJob],
+        subtitle_translation: str | None = None,
+    ) -> list[SubtitlePreparationResult]:
+        """
+        Prepare ASS subtitle files for multiple clips, preserving input order.
+
+        When translation is enabled, this can run the per-clip LLM work in
+        parallel while leaving video rendering to the caller.
+        """
+        if not jobs:
+            return []
+
+        max_workers = min(self.subtitle_translation_max_workers, len(jobs))
+        if not self._should_prepare_translations_in_parallel(subtitle_translation) or max_workers <= 1:
+            return [
+                self._prepare_ass_job(job, subtitle_translation)
+                for job in jobs
+            ]
+
+        logger.info(
+            "  Preparing translated subtitles for %s clips with %s workers",
+            len(jobs),
+            max_workers,
+        )
+        results: list[SubtitlePreparationResult | None] = [None] * len(jobs)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            started_at = {}
+            for index, job in enumerate(jobs):
+                logger.info(
+                    "  Translation prep task %s/%s launched: %s",
+                    index + 1,
+                    len(jobs),
+                    job.mp4.name,
+                )
+                launched_at = perf_counter()
+                future = executor.submit(self._prepare_ass_job, job, subtitle_translation)
+                futures[future] = index
+                started_at[future] = launched_at
+                if index < len(jobs) - 1 and self.subtitle_translation_launch_stagger_seconds > 0:
+                    time.sleep(self.subtitle_translation_launch_stagger_seconds)
+
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    job = jobs[index]
+                    logger.warning(f"  Translation prep task failed for {job.mp4.name}: {exc}")
+                    result = SubtitlePreparationResult(job=job, ok=False)
+                elapsed = perf_counter() - started_at[future]
+                logger.info(
+                    "  Translation prep task %s/%s completed in %.1fs: %s",
+                    index + 1,
+                    len(jobs),
+                    elapsed,
+                    result.job.mp4.name,
+                )
+                results[index] = result
+
+        return [
+            result if result is not None else SubtitlePreparationResult(job=jobs[index], ok=False)
+            for index, result in enumerate(results)
+        ]
+
+    def _write_srt_segments(self, srt_path: Path, segments: list[dict[str, str]]) -> None:
+        blocks = []
+        for index, segment in enumerate(segments, start=1):
+            blocks.append(
+                "\n".join(
+                    [
+                        str(index),
+                        f"{segment['start']} --> {segment['end']}",
+                        segment["text"],
+                    ]
+                )
+            )
+        srt_path.write_text("\n\n".join(blocks).strip() + "\n", encoding="utf-8")
+
     def prepare_ass_for_clip(
-        self, srt_path: Path, ass_path: Path, subtitle_translation: str = None
+        self,
+        srt_path: Path,
+        ass_path: Path,
+        subtitle_translation: str = None,
+        translated_srt_path: Path | None = None,
+        translated_output_path: Path | None = None,
     ) -> bool:
         """
         Write an ASS subtitle file for a single clip.
@@ -332,13 +511,21 @@ class SubtitleBurner:
             srt_path: Source SRT file.
             ass_path: Destination ASS file to write.
             subtitle_translation: If set, translate and include a second track.
+            translated_srt_path: Existing translated sidecar to use if available.
+            translated_output_path: Destination to persist newly generated translated subtitles.
 
         Returns True on success, False if the SRT is empty.
         """
         segments = self._parse_srt(srt_path)
         if not segments:
             return False
-        translated = self._translate_srt(segments, subtitle_translation) if subtitle_translation and self.client else None
+        translated = None
+        if translated_srt_path and Path(translated_srt_path).exists():
+            translated = self._parse_srt(Path(translated_srt_path))
+        elif subtitle_translation and self.client:
+            translated = self._translate_srt(segments, subtitle_translation)
+            if translated and translated_output_path:
+                self._write_srt_segments(Path(translated_output_path), translated)
         ass_path.write_text(self._generate_ass(segments, translated), encoding="utf-8")
         return True
 
@@ -396,11 +583,23 @@ class SubtitleBurner:
     # ------------------------------------------------------------------
 
     def _process_clip(
-        self, mp4: Path, srt: Path, output: Path, subtitle_translation: str = None
+        self,
+        mp4: Path,
+        srt: Path,
+        output: Path,
+        subtitle_translation: str = None,
+        translated_srt_path: Path | None = None,
+        translated_output_path: Path | None = None,
     ) -> bool:
         """Generate ASS + burn into output MP4."""
         ass_path = output.with_suffix(".ass")
-        ok = self.prepare_ass_for_clip(srt, ass_path, subtitle_translation)
+        ok = self.prepare_ass_for_clip(
+            srt,
+            ass_path,
+            subtitle_translation,
+            translated_srt_path=translated_srt_path,
+            translated_output_path=translated_output_path,
+        )
         if not ok:
             logger.warning(f"  Skipping {mp4.name}: no subtitle segments found")
             return False
@@ -442,28 +641,61 @@ class SubtitleBurner:
                 segments[i]["end"] = segments[i + 1]["start"]
         return segments
 
-    def _parse_numbered_translation_lines(self, text: str, expected_count: int) -> list[str] | None:
+    def _extract_json_array(self, text: str) -> list | None:
+        cleaned = text.strip()
+        candidates = [cleaned]
+
+        fenced_json = re.search(r"```json\s*(\[.*?\])\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+        if fenced_json:
+            candidates.append(fenced_json.group(1))
+
+        fenced = re.search(r"```\s*(\[.*?\])\s*```", cleaned, re.DOTALL)
+        if fenced:
+            candidates.append(fenced.group(1))
+
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, list):
+                return payload
+
+        decoder = json.JSONDecoder()
+        start = cleaned.find("[")
+        if start != -1:
+            try:
+                payload, _ = decoder.raw_decode(cleaned[start:])
+            except json.JSONDecodeError:
+                return None
+            if isinstance(payload, list):
+                return payload
+
+        return None
+
+    def _parse_translation_json(self, text: str, expected_count: int) -> list[str] | None:
         """
         Parse translation output in the form:
-          1|translated text
-          2|translated text
+          [{"id": 1, "translation": "..."}, ...]
         Returns a list of translated strings ordered by id, or None on failure.
         """
-        cleaned = re.sub(r"^```[a-z]*\n?", "", text.strip(), flags=re.MULTILINE)
-        cleaned = re.sub(r"^```$", "", cleaned, flags=re.MULTILINE)
+        payload = self._extract_json_array(text)
+        if payload is None or len(payload) != expected_count:
+            return None
 
         translations_by_id = {}
-        for raw_line in cleaned.splitlines():
-            line = raw_line.strip()
-            if not line:
+        for item in payload:
+            if not isinstance(item, dict):
                 continue
-            parts = line.split("|", 1)
-            if len(parts) != 2:
+            if "id" not in item or "translation" not in item:
                 return None
-            line_id, translated_text = parts
-            if not line_id.strip().isdigit():
+            line_id = item["id"]
+            translated_text = item["translation"]
+            if not isinstance(line_id, int):
                 return None
-            idx = int(line_id.strip())
+            if not isinstance(translated_text, str):
+                return None
+            idx = line_id
             if idx < 1 or idx > expected_count:
                 return None
             translations_by_id[idx] = translated_text.strip()
@@ -478,28 +710,34 @@ class SubtitleBurner:
         Translate subtitle text lines via LLM while keeping SRT timing/structure local.
         Returns translated segments on success, None on failure (caller burns original-only).
         """
-        numbered_lines = "\n".join(
-            f"{i}|{seg['text'].replace(chr(10), ' ').strip()}"
+        numbered_lines = [
+            {
+                "id": i,
+                "text": seg["text"].replace(chr(10), " ").strip(),
+            }
             for i, seg in enumerate(segments, 1)
-        )
+        ]
         n = len(segments)
         prompt = (
             f"Translate the following subtitle lines to {target_lang}.\n"
-            f"The input contains exactly {n} lines.\n"
+            f"The input contains exactly {n} subtitle lines.\n"
+            "Input JSON:\n"
+            f"{json.dumps(numbered_lines, ensure_ascii=False)}\n\n"
             "Rules:\n"
+            "- Return valid JSON only.\n"
+            "- Return exactly one object per input line.\n"
             "- Keep every numeric id exactly the same.\n"
-            "- Translate only the text after the pipe character.\n"
-            "- Return exactly one output line per input line in the format id|translation.\n"
-            "- Do not merge lines, split lines, add commentary, add markdown, or return timestamps.\n"
-            "- Keep each translation on a single line.\n\n"
-            + numbered_lines
+            '- Use this schema exactly: [{"id": 1, "translation": "..."}]\n'
+            "- Translate only the text field.\n"
+            "- Keep each translation on a single line.\n"
+            "- Do not merge lines, split lines, add commentary, add markdown, or return timestamps."
         )
         try:
-            response = self.client.simple_chat(prompt, model=self.model)
-            translated_texts = self._parse_numbered_translation_lines(response, len(segments))
+            response = self.client.simple_chat(prompt, model=self.model, temperature=0)
+            translated_texts = self._parse_translation_json(response, len(segments))
             if translated_texts is None:
                 logger.warning(
-                    "Translation returned malformed numbered lines; burning original subtitles only."
+                    "Translation returned malformed JSON payload; burning original subtitles only."
                 )
                 return None
 

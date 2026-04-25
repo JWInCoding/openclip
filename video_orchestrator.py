@@ -25,7 +25,7 @@ from core.insights_analyzer import InsightsAnalyzer
 from core.analysis_coordinator import AnalysisCoordinator
 from core.clip_generator import ClipGenerator
 from core.title_adder import TitleAdder, TITLE_FONT_SIZES
-from core.subtitle_burner import SubtitleBurner, SubtitleStyleConfig
+from core.subtitle_burner import SubtitleBurner, SubtitlePreparationJob, SubtitleStyleConfig
 from core.cover_image_generator import CoverImageGenerator, COVER_COLORS
 from core.editor import load_manifest, upsert_manifest
 
@@ -38,7 +38,7 @@ from core.video_utils import (
     find_existing_download,
     insights_to_clip_format,
 )
-from core.config import DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, API_KEY_ENV_VARS, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, SKIP_DOWNLOAD, SKIP_TRANSCRIPT, SUPPORTED_LLM_PROVIDERS
+from core.config import DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, API_KEY_ENV_VARS, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, SKIP_DOWNLOAD, SKIP_TRANSCRIPT, SUPPORTED_LLM_PROVIDERS, SUBTITLE_TRANSLATION_MAX_WORKERS
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -86,6 +86,7 @@ class VideoOrchestrator:
                 subtitle_style_vertical_position: str = "bottom",
                 subtitle_style_bilingual_layout: str = "auto",
                 subtitle_style_background_style: str = "none",
+                subtitle_translation_max_workers: int = SUBTITLE_TRANSLATION_MAX_WORKERS,
                 user_intent: Optional[str] = None,
                 agentic_analysis: bool = False,
                 normalize_boundaries: bool = True):
@@ -135,6 +136,7 @@ class VideoOrchestrator:
         self.subtitle_style_vertical_position = subtitle_style_vertical_position
         self.subtitle_style_bilingual_layout = subtitle_style_bilingual_layout
         self.subtitle_style_background_style = subtitle_style_background_style
+        self.subtitle_translation_max_workers = max(1, int(subtitle_translation_max_workers))
         self.cover_text_location = cover_text_location
         self.cover_fill_color = cover_fill_color
         self.cover_outline_color = cover_outline_color
@@ -241,6 +243,7 @@ class VideoOrchestrator:
                     bilingual_layout=subtitle_style_bilingual_layout,
                     background_style=subtitle_style_background_style,
                 ),
+                subtitle_translation_max_workers=self.subtitle_translation_max_workers,
             )
             self.subtitle_translation = subtitle_translation
             if subtitle_translation:
@@ -519,24 +522,55 @@ class VideoOrchestrator:
                         ass_tmp_dir.mkdir(exist_ok=True)
                         successful = 0
                         total = 0
-                        for mp4 in sorted(
+                        mp4s = sorted(
                             source_clips_dir / name for name in _current_clips
                             if (source_clips_dir / name).exists()
-                        ):
-                            total += 1
+                        )
+                        ass_jobs = []
+                        for mp4 in mp4s:
                             srt = self.subtitle_burner.preferred_subtitle_path_for_clip(mp4)
-                            ass_path = ass_tmp_dir / mp4.with_suffix(".ass").name
                             if srt.exists():
-                                self.subtitle_burner.prepare_ass_for_clip(
-                                    srt, ass_path,
-                                    subtitle_translation=self.subtitle_translation,
+                                ass_jobs.append(
+                                    SubtitlePreparationJob(
+                                        mp4=mp4,
+                                        srt=srt,
+                                        ass_path=ass_tmp_dir / mp4.with_suffix(".ass").name,
+                                        translated_output_path=(
+                                            mp4.with_suffix(".translated.srt")
+                                            if self.subtitle_translation
+                                            else None
+                                        ),
+                                    )
                                 )
+                        ass_results = self.subtitle_burner.prepare_ass_for_clips(
+                            ass_jobs,
+                            subtitle_translation=self.subtitle_translation,
+                        )
+                        prepared_ass_paths = {
+                            result.job.mp4.name: result.job.ass_path
+                            for result in ass_results
+                            if result.ok and result.job.ass_path.exists()
+                        }
+                        translated_subtitle_filenames = {
+                            result.job.mp4.name: Path(result.job.translated_output_path).name
+                            for result in ass_results
+                            if result.ok
+                            and result.job.translated_output_path
+                            and Path(result.job.translated_output_path).exists()
+                        }
+                        for clip_info in clip_result.get('clips_info', []):
+                            translated_filename = translated_subtitle_filenames.get(clip_info.get('filename'))
+                            if translated_filename:
+                                clip_info['translated_subtitle_filename'] = translated_filename
+                        for mp4 in mp4s:
+                            total += 1
+                            ass_path = prepared_ass_paths.get(mp4.name)
                             clip_title = _title_map.get(mp4.name, mp4.stem.replace("_", " "))
                             out = video_clips_post_processed_dir / mp4.name
                             ok = self.title_adder._add_artistic_title(
                                 str(mp4), clip_title, str(out),
                                 self.title_style, self.title_font_size,
-                                ass_path=str(ass_path) if ass_path.exists() else None,
+                                ass_path=str(ass_path) if ass_path else None,
                             )
                             if ok:
                                 successful += 1
@@ -563,6 +597,15 @@ class VideoOrchestrator:
                             clip_titles=_clip_titles,
                         )
                         subtitle_result["title_overlay_enabled"] = False
+                        translated_by_filename = {
+                            item.get("filename"): item.get("translated_subtitle_filename")
+                            for item in subtitle_result.get("processed_clips", [])
+                            if item.get("filename") and item.get("translated_subtitle_filename")
+                        }
+                        for clip_info in _clips_info:
+                            translated_filename = translated_by_filename.get(clip_info.get("filename"))
+                            if translated_filename:
+                                clip_info["translated_subtitle_filename"] = translated_filename
                         result.post_processing = subtitle_result
 
                     elif has_titles:
@@ -1314,6 +1357,9 @@ Note: Set the API key environment variable for your selected provider when requi
                        help='Translate subtitles to this language before burning '
                             '(e.g. "Simplified Chinese"). Both original and translated tracks are burned. '
                             'Requires --burn-subtitles and any provider credentials/configuration needed by the selected LLM.')
+    parser.add_argument('--subtitle-translation-workers', type=int, default=SUBTITLE_TRANSLATION_MAX_WORKERS,
+                       help=f'Maximum parallel subtitle translation LLM calls per video (default: {SUBTITLE_TRANSLATION_MAX_WORKERS}). '
+                            'Only applies when --subtitle-translation is set.')
     parser.add_argument('--user-intent', metavar='TEXT',
                        help='Free-text description of what you are looking for '
                             '(e.g. "moments about AI risks"). Steers LLM clip selection '
@@ -1381,6 +1427,7 @@ Note: Set the API key environment variable for your selected provider when requi
         subtitle_style_vertical_position="bottom",
         subtitle_style_bilingual_layout="auto",
         subtitle_style_background_style="none",
+        subtitle_translation_max_workers=args.subtitle_translation_workers,
         user_intent=args.user_intent,
         agentic_analysis=args.agentic_analysis,
         normalize_boundaries=args.normalize_boundaries,
