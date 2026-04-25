@@ -5,6 +5,7 @@ Qwen API Client - Sample implementation for interacting with Qwen API
 import json
 import logging
 import requests
+import time
 from typing import Dict, List, Optional, Any
 import os
 
@@ -108,7 +109,7 @@ class QwenAPIClient:
         # Use default values from config if not provided
         model = model or self.default_model
         max_tokens = max_tokens or LLM_CONFIG["qwen"]["default_params"]["max_tokens"]
-        temperature = temperature or LLM_CONFIG["qwen"]["default_params"]["temperature"]
+        temperature = temperature if temperature is not None else LLM_CONFIG["qwen"]["default_params"]["temperature"]
         top_p = top_p or LLM_CONFIG["qwen"]["default_params"]["top_p"]
         stream = stream if stream is not None else LLM_CONFIG["qwen"]["default_params"]["stream"]
         
@@ -140,7 +141,12 @@ class QwenAPIClient:
         
         return self._make_request(payload, model)
     
-    def simple_chat(self, prompt: str, model: Optional[str] = None) -> str:
+    def simple_chat(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+    ) -> str:
         """
         Simple chat interface - send a prompt and get response
         
@@ -155,7 +161,7 @@ class QwenAPIClient:
         model = model or self.default_model
         
         messages = [QwenMessage(role="user", content=prompt)]
-        response = self.chat_completion(messages, model=model)
+        response = self.chat_completion(messages, model=model, temperature=temperature)
         
         try:
             # Try OpenAI-compatible format first (new models)
