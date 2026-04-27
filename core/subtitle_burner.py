@@ -527,10 +527,13 @@ class SubtitleBurner:
 
         return [translations_by_id[i] for i in range(1, expected_count + 1)]
 
+    _MAX_TRANSLATION_RETRIES = 3
+
     def _translate_srt(self, segments: list, target_lang: str) -> list | None:
         """
         Translate subtitle text lines via LLM while keeping SRT timing/structure local.
         Returns translated segments on success, None on failure (caller burns original-only).
+        Retries up to _MAX_TRANSLATION_RETRIES times when the response has wrong line count.
         """
         numbered_lines = "\n".join(
             f"{i}|{seg['text'].replace(chr(10), ' ').strip()}"
@@ -548,31 +551,35 @@ class SubtitleBurner:
             "- Keep each translation on a single line.\n\n"
             + numbered_lines
         )
-        try:
-            response = self.client.simple_chat(prompt, model=self.model)
-            translated_texts = self._parse_numbered_translation_lines(response, len(segments))
-            if translated_texts is None:
-                # Log the first 800 chars of the raw response so the malformed
-                # content is visible without flooding the log with huge payloads.
-                preview = response[:800].replace("\n", "\\n")
+        last_preview = ""
+        for attempt in range(1, self._MAX_TRANSLATION_RETRIES + 1):
+            try:
+                response = self.client.simple_chat(prompt, model=self.model)
+                translated_texts = self._parse_numbered_translation_lines(response, n)
+                if translated_texts is not None:
+                    return [
+                        {
+                            "start": seg["start"],
+                            "end": seg["end"],
+                            "text": translated_texts[i],
+                        }
+                        for i, seg in enumerate(segments)
+                    ]
+                last_preview = response[:800].replace("\n", "\\n")
                 logger.warning(
-                    f"Translation returned malformed numbered lines "
-                    f"(expected {len(segments)} lines); burning original subtitles only. "
-                    f"Raw response preview: {preview!r}"
+                    f"Translation attempt {attempt}/{self._MAX_TRANSLATION_RETRIES} returned malformed numbered lines "
+                    f"(expected {n} lines); retrying. Raw response preview: {last_preview!r}"
                 )
-                return None
+            except Exception as e:
+                logger.warning(
+                    f"Translation attempt {attempt}/{self._MAX_TRANSLATION_RETRIES} failed ({e}); retrying."
+                )
 
-            return [
-                {
-                    "start": seg["start"],
-                    "end": seg["end"],
-                    "text": translated_texts[i],
-                }
-                for i, seg in enumerate(segments)
-            ]
-        except Exception as e:
-            logger.warning(f"Translation failed ({e}); burning original subtitles only.")
-            return None
+        logger.warning(
+            f"All {self._MAX_TRANSLATION_RETRIES} translation attempts failed; "
+            f"burning original subtitles only. Last raw response preview: {last_preview!r}"
+        )
+        return None
 
     def _srt_time_to_ass(self, t: str) -> str:
         """Convert SRT time 'HH:MM:SS,mmm' to ASS time 'H:MM:SS.cc'."""
