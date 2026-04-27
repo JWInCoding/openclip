@@ -25,8 +25,9 @@ from core.insights_analyzer import InsightsAnalyzer
 from core.analysis_coordinator import AnalysisCoordinator
 from core.clip_generator import ClipGenerator
 from core.title_adder import TitleAdder, TITLE_FONT_SIZES
-from core.subtitle_burner import SubtitleBurner, SubtitleStyleConfig
+from core.subtitle_burner import SubtitleBurner, SubtitlePreparationJob, SubtitleStyleConfig
 from core.cover_image_generator import CoverImageGenerator, COVER_COLORS
+from core.editor import load_manifest, upsert_manifest
 
 # Import our utilities (including processing result classes)
 from core.video_utils import (
@@ -37,7 +38,7 @@ from core.video_utils import (
     find_existing_download,
     insights_to_clip_format,
 )
-from core.config import DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, API_KEY_ENV_VARS, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, SKIP_DOWNLOAD, SKIP_TRANSCRIPT, SUPPORTED_LLM_PROVIDERS
+from core.config import DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, API_KEY_ENV_VARS, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, SKIP_DOWNLOAD, SKIP_TRANSCRIPT, SUPPORTED_LLM_PROVIDERS, SUBTITLE_TRANSLATION_MAX_WORKERS
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -85,6 +86,7 @@ class VideoOrchestrator:
                 subtitle_style_vertical_position: str = "bottom",
                 subtitle_style_bilingual_layout: str = "auto",
                 subtitle_style_background_style: str = "none",
+                subtitle_translation_max_workers: int = SUBTITLE_TRANSLATION_MAX_WORKERS,
                 user_intent: Optional[str] = None,
                 agentic_analysis: bool = False,
                 normalize_boundaries: bool = True):
@@ -129,6 +131,12 @@ class VideoOrchestrator:
         self.mode = mode
         self.agentic_analysis = agentic_analysis
         self.title_font_size = TITLE_FONT_SIZES.get(title_font_size, 40)
+        self.subtitle_style_preset = subtitle_style_preset
+        self.subtitle_style_font_size = subtitle_style_font_size
+        self.subtitle_style_vertical_position = subtitle_style_vertical_position
+        self.subtitle_style_bilingual_layout = subtitle_style_bilingual_layout
+        self.subtitle_style_background_style = subtitle_style_background_style
+        self.subtitle_translation_max_workers = max(1, int(subtitle_translation_max_workers))
         self.cover_text_location = cover_text_location
         self.cover_fill_color = cover_fill_color
         self.cover_outline_color = cover_outline_color
@@ -235,6 +243,7 @@ class VideoOrchestrator:
                     bilingual_layout=subtitle_style_bilingual_layout,
                     background_style=subtitle_style_background_style,
                 ),
+                subtitle_translation_max_workers=self.subtitle_translation_max_workers,
             )
             self.subtitle_translation = subtitle_translation
             if subtitle_translation:
@@ -311,6 +320,7 @@ class VideoOrchestrator:
                 logger.info("📁 Step 1: Processing local video file...")
                 file_result = await self._process_local_video(source, progress_callback)
                 result.video_path = file_result['video_path']
+                result.source_video_path = file_result['video_path']
                 result.video_info = file_result['video_info']
                 subtitle_path = file_result.get('subtitle_path', '')
             else:
@@ -323,6 +333,7 @@ class VideoOrchestrator:
                         raise Exception("No existing download found. Remove --skip-download to download the video.")
 
                     result.video_path = download_result['video_path']
+                    result.source_video_path = download_result['video_path']
                     result.video_info = download_result['video_info']
                     subtitle_path = download_result['subtitle_path']
                 else:
@@ -334,6 +345,7 @@ class VideoOrchestrator:
                         raise Exception("Video download failed")
 
                     result.video_path = download_result['video_path']
+                    result.source_video_path = download_result['video_path']
                     result.video_info = download_result['video_info']
                     subtitle_path = download_result['subtitle_path']
 
@@ -361,6 +373,7 @@ class VideoOrchestrator:
                 result.was_split = True
                 result.video_parts = split_result['video_parts']
                 result.transcript_parts = split_result['transcript_parts']
+                result.part_offsets = split_result.get('part_offsets', {})
             else:
                 # Treat single video as split video with one part (_part01)
                 video_file = Path(result.video_path)
@@ -374,6 +387,7 @@ class VideoOrchestrator:
                 result.was_split = True
                 result.video_parts = [str(splits_video)]
                 result.video_path = str(splits_video)
+                result.part_offsets = {"part01": 0.0}
 
                 if subtitle_path and Path(subtitle_path).exists():
                     sub_file = Path(subtitle_path)
@@ -540,24 +554,55 @@ class VideoOrchestrator:
                         ass_tmp_dir.mkdir(exist_ok=True)
                         successful = 0
                         total = 0
-                        for mp4 in sorted(
+                        mp4s = sorted(
                             source_clips_dir / name for name in _current_clips
                             if (source_clips_dir / name).exists()
-                        ):
-                            total += 1
+                        )
+                        ass_jobs = []
+                        for mp4 in mp4s:
                             srt = self.subtitle_burner.preferred_subtitle_path_for_clip(mp4)
-                            ass_path = ass_tmp_dir / mp4.with_suffix(".ass").name
                             if srt.exists():
-                                self.subtitle_burner.prepare_ass_for_clip(
-                                    srt, ass_path,
-                                    subtitle_translation=self.subtitle_translation,
+                                ass_jobs.append(
+                                    SubtitlePreparationJob(
+                                        mp4=mp4,
+                                        srt=srt,
+                                        ass_path=ass_tmp_dir / mp4.with_suffix(".ass").name,
+                                        translated_output_path=(
+                                            mp4.with_suffix(".translated.srt")
+                                            if self.subtitle_translation
+                                            else None
+                                        ),
+                                    )
                                 )
+                        ass_results = self.subtitle_burner.prepare_ass_for_clips(
+                            ass_jobs,
+                            subtitle_translation=self.subtitle_translation,
+                        )
+                        prepared_ass_paths = {
+                            result.job.mp4.name: result.job.ass_path
+                            for result in ass_results
+                            if result.ok and result.job.ass_path.exists()
+                        }
+                        translated_subtitle_filenames = {
+                            result.job.mp4.name: Path(result.job.translated_output_path).name
+                            for result in ass_results
+                            if result.ok
+                            and result.job.translated_output_path
+                            and Path(result.job.translated_output_path).exists()
+                        }
+                        for clip_info in clip_result.get('clips_info', []):
+                            translated_filename = translated_subtitle_filenames.get(clip_info.get('filename'))
+                            if translated_filename:
+                                clip_info['translated_subtitle_filename'] = translated_filename
+                        for mp4 in mp4s:
+                            total += 1
+                            ass_path = prepared_ass_paths.get(mp4.name)
                             clip_title = _title_map.get(mp4.name, mp4.stem.replace("_", " "))
                             out = video_clips_post_processed_dir / mp4.name
                             ok = self.title_adder._add_artistic_title(
                                 str(mp4), clip_title, str(out),
                                 self.title_style, self.title_font_size,
-                                ass_path=str(ass_path) if ass_path.exists() else None,
+                                ass_path=str(ass_path) if ass_path else None,
                             )
                             if ok:
                                 successful += 1
@@ -568,6 +613,8 @@ class VideoOrchestrator:
                             "total_clips": total,
                             "successful_clips": successful,
                             "failed_clips": total - successful,
+                            "title_style": self.title_style,
+                            "title_overlay_enabled": True,
                         }
                         logger.info(f"   {successful}/{total} clips post-processed (title + subtitles)")
 
@@ -581,6 +628,16 @@ class VideoOrchestrator:
                             clip_filenames=_current_clips,
                             clip_titles=_clip_titles,
                         )
+                        subtitle_result["title_overlay_enabled"] = False
+                        translated_by_filename = {
+                            item.get("filename"): item.get("translated_subtitle_filename")
+                            for item in subtitle_result.get("processed_clips", [])
+                            if item.get("filename") and item.get("translated_subtitle_filename")
+                        }
+                        for clip_info in _clips_info:
+                            translated_filename = translated_by_filename.get(clip_info.get("filename"))
+                            if translated_filename:
+                                clip_info["translated_subtitle_filename"] = translated_filename
                         result.post_processing = subtitle_result
 
                     elif has_titles:
@@ -592,6 +649,7 @@ class VideoOrchestrator:
                             self.title_font_size,
                             progress_callback=title_progress_callback,
                         )
+                        title_result["title_overlay_enabled"] = True
                         result.post_processing = title_result
             elif self.clip_generator and not engaging_result:
                 logger.warning("⚠️  Clip generation enabled but no analysis file found")
@@ -605,6 +663,8 @@ class VideoOrchestrator:
                 # Pass the video-specific clip directory to cover generation
                 cover_result = self._generate_cover_image(result, engaging_result, video_clips_dir, video_titles_dir)
                 result.cover_generation = cover_result
+
+            self._refresh_editor_manifest(result, video_root_dir)
             
             result.success = True
             
@@ -1048,6 +1108,7 @@ class VideoOrchestrator:
                     self.title_font_size,
                     progress_callback=title_progress_wrapper
                 )
+                title_result["title_overlay_enabled"] = True
                 result.post_processing = title_result
 
             # Step 7: Generate cover images (if enabled)
@@ -1062,6 +1123,8 @@ class VideoOrchestrator:
                 )
                 result.cover_generation = cover_result
 
+            self._refresh_editor_manifest(result, video_root_dir)
+
             if progress_callback:
                 progress_callback("Phase 2 completed!", 100)
 
@@ -1071,6 +1134,39 @@ class VideoOrchestrator:
                 progress_callback(f"Phase 2 failed: {e}", 0)
 
         return result
+
+    def _refresh_editor_manifest(self, result: ProcessingResult, video_root_dir: Path) -> None:
+        """Write or refresh the editor manifest when clip outputs exist."""
+        clip_generation = getattr(result, "clip_generation", None) or {}
+        if not clip_generation.get("success") or not clip_generation.get("clips_info"):
+            return
+
+        manifest_path = upsert_manifest(
+            video_root_dir=video_root_dir,
+            result=result,
+            title_style=self.title_style,
+            title_font_size=self.title_font_size,
+            subtitle_translation=self.subtitle_translation,
+            subtitle_style_preset=self.subtitle_style_preset,
+            subtitle_style_font_size=self.subtitle_style_font_size,
+            subtitle_style_vertical_position=self.subtitle_style_vertical_position,
+            subtitle_style_bilingual_layout=self.subtitle_style_bilingual_layout,
+            subtitle_style_background_style=self.subtitle_style_background_style,
+            cover_text_location=self.cover_text_location,
+            cover_fill_color=self.cover_fill_color,
+            cover_outline_color=self.cover_outline_color,
+        )
+        manifest = load_manifest(manifest_path)
+        result.editor_project_id = manifest.project_id
+        result.editor_manifest_path = str(manifest_path)
+        result.editor_project = {
+            "project_id": manifest.project_id,
+            "manifest_path": str(manifest_path),
+            "project_root": str(video_root_dir),
+            "projects_root": str(video_root_dir.parent),
+        }
+        result.clip_generation["editor_project_id"] = manifest.project_id
+        result.clip_generation["editor_manifest_path"] = str(manifest_path)
 
     def _generate_cover_image(self, result: ProcessingResult, engaging_result: Dict[str, Any],
                              clips_dir: Path, covers_output_dir: Path) -> Dict[str, Any]:
@@ -1130,11 +1226,14 @@ class VideoOrchestrator:
                 )
                 
                 if success:
+                    vertical_cover_path = cover_path.with_name(cover_path.stem + '_vertical' + cover_path.suffix)
                     generated_covers.append({
                         'rank': rank,
                         'title': moment_title,
                         'filename': cover_filename,
-                        'path': str(cover_path)
+                        'path': str(cover_path),
+                        'vertical_filename': vertical_cover_path.name if vertical_cover_path.exists() else None,
+                        'vertical_path': str(vertical_cover_path) if vertical_cover_path.exists() else None,
                     })
                     logger.info(f"✓ Cover saved: {cover_filename}")
                 else:
@@ -1290,6 +1389,9 @@ Note: Set the API key environment variable for your selected provider when requi
                        help='Translate subtitles to this language before burning '
                             '(e.g. "Simplified Chinese"). Both original and translated tracks are burned. '
                             'Requires --burn-subtitles and any provider credentials/configuration needed by the selected LLM.')
+    parser.add_argument('--subtitle-translation-workers', type=int, default=SUBTITLE_TRANSLATION_MAX_WORKERS,
+                       help=f'Maximum parallel subtitle translation LLM calls per video (default: {SUBTITLE_TRANSLATION_MAX_WORKERS}). '
+                            'Only applies when --subtitle-translation is set.')
     parser.add_argument('--user-intent', metavar='TEXT',
                        help='Free-text description of what you are looking for '
                             '(e.g. "moments about AI risks"). Steers LLM clip selection '
@@ -1357,6 +1459,7 @@ Note: Set the API key environment variable for your selected provider when requi
         subtitle_style_vertical_position="bottom",
         subtitle_style_bilingual_layout="auto",
         subtitle_style_background_style="none",
+        subtitle_translation_max_workers=args.subtitle_translation_workers,
         user_intent=args.user_intent,
         agentic_analysis=args.agentic_analysis,
         normalize_boundaries=args.normalize_boundaries,

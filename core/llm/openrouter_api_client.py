@@ -98,7 +98,7 @@ class OpenRouterAPIClient:
         # Use default values from config if not provided
         model = model or LLM_CONFIG["openrouter"]["default_model"]
         max_tokens = max_tokens or LLM_CONFIG["openrouter"]["default_params"]["max_tokens"]
-        temperature = temperature or LLM_CONFIG["openrouter"]["default_params"]["temperature"]
+        temperature = temperature if temperature is not None else LLM_CONFIG["openrouter"]["default_params"]["temperature"]
         top_p = top_p or LLM_CONFIG["openrouter"]["default_params"]["top_p"]
         stream = stream if stream is not None else LLM_CONFIG["openrouter"]["default_params"]["stream"]
         
@@ -113,7 +113,12 @@ class OpenRouterAPIClient:
         
         return self._make_request(payload)
     
-    def simple_chat(self, prompt: str, model: Optional[str] = None) -> str:
+    def simple_chat(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+    ) -> str:
         """
         Simple chat interface - send a prompt and get response
         
@@ -128,7 +133,7 @@ class OpenRouterAPIClient:
         model = model or LLM_CONFIG["openrouter"]["default_model"]
         
         messages = [OpenRouterMessage(role="user", content=prompt)]
-        response = self.chat_completion(messages, model=model)
+        response = self.chat_completion(messages, model=model, temperature=temperature)
 
         try:
             content = response["choices"][0]["message"]["content"]

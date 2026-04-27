@@ -5,6 +5,7 @@ Provides a web interface for video processing with AI-powered analysis
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import asyncio
 import os
 import json
@@ -13,19 +14,51 @@ import time
 import threading
 import tempfile
 import copy
+import webbrowser
 from pathlib import Path
 from typing import Optional, Dict, Any
+from urllib.parse import urlparse
 
+from core.browser_preferences import (
+    PREFERENCES_COOKIE_NAME,
+    PREFERENCES_HYDRATED_FLAG,
+    build_preferences_payload,
+    deserialize_preferences_payload,
+    merge_browser_preferences,
+    serialize_preferences_payload,
+)
+from core.browser_session import (
+    INPUT_TYPE_SERVER_PATH,
+    INPUT_TYPE_UPLOAD,
+    INPUT_TYPE_URL,
+    normalize_input_type,
+    reset_browser_state,
+)
 from core.file_string_utils import FileStringUtils
 from core.subtitle_burner import SubtitleBurner, SubtitleStyleConfig
 # Import the video orchestrator
 from video_orchestrator import VideoOrchestrator
+from core.video_utils import VideoFileValidator
 from core.config import API_KEY_ENV_VARS, DEFAULT_LLM_PROVIDER, DEFAULT_TITLE_STYLE, MAX_DURATION_MINUTES, WHISPER_MODEL, MAX_CLIPS, LLM_CONFIG, SUPPORTED_LLM_PROVIDERS
 from core.transcript_generation_whisperx import WHISPERX_AVAILABLE
+from core.editor import ensure_editor_service
 from core.downloaders.bilibili_downloader import ImprovedBilibiliDownloader
 
 # Import job manager for background processing
 from job_manager import get_job_manager, JobStatus
+from core.upload_staging import (
+    SOURCE_KIND_SERVER_PATH,
+    SOURCE_KIND_UPLOADED_FILE,
+    SOURCE_KIND_URL,
+    delete_upload_record,
+    ensure_owner_session_id,
+    list_uploads_for_owner,
+    stage_uploaded_file,
+    uploads_root_for_output_dir,
+)
+
+
+LOCAL_EDITOR_HOSTS = {'localhost', '127.0.0.1', '::1'}
 
 
 def is_bilibili_url(url: str) -> bool:
@@ -39,6 +72,25 @@ def is_bilibili_url(url: str) -> bool:
         r'https?://(?:m\.)?bilibili\.com/video/',
     ]
     return any(re.match(pattern, url) for pattern in bilibili_patterns)
+
+
+def _is_local_editor_url(editor_url: str) -> bool:
+    try:
+        host = urlparse(editor_url).hostname or ''
+    except Exception:
+        return False
+    return host.lower() in LOCAL_EDITOR_HOSTS
+
+
+def _show_editor_launch(editor_url: str) -> None:
+    st.session_state.editor_launch_url = editor_url
+    if _is_local_editor_url(editor_url):
+        webbrowser.open_new_tab(editor_url)
+        st.success(f'Editor launched: {editor_url}')
+    else:
+        st.success('Editor is ready.')
+        st.caption('Open the editor from this browser. The server will not open a tab for remote/LAN URLs.')
+    st.markdown(f'[Open Clip Editor]({editor_url})')
 
 
 async def get_bilibili_multi_parts(url: str, browser: Optional[str] = None, cookies_file: Optional[str] = None) -> list:
@@ -187,6 +239,9 @@ TRANSLATIONS = {
         'select_input_type': 'Select input type',
         'enter_video_url': 'Enter Bilibili or YouTube URL',
         'video_url_help': 'Supports Bilibili (https://www.bilibili.com/video/BV...) and YouTube (https://www.youtube.com/watch?v=...) URLs',
+        'upload_file': 'Upload File',
+        'server_file_path': 'Local Path',
+        'server_file_help': 'Enter a full path on the machine running OpenClip.',
         'local_file_help': 'Enter the full path to a local video file',
         'local_file_srt_notice': 'To use existing subtitles, place the .srt file in the same directory with the same filename (e.g. video.mp4 → video.srt).',
         'select_llm_provider': 'Select which AI provider to use for analysis',
@@ -300,6 +355,9 @@ TRANSLATIONS = {
         'select_input_type': '选择输入类型',
         'enter_video_url': '输入 B 站或 YouTube 链接',
         'video_url_help': '支持 B 站 (https://www.bilibili.com/video/BV...) 和 YouTube (https://www.youtube.com/watch?v=...) 链接',
+        'upload_file': '上传文件',
+        'server_file_path': '本地路径',
+        'server_file_help': '输入运行 OpenClip 的那台机器上的完整文件路径。',
         'local_file_help': '输入本地视频文件的完整路径',
         'local_file_srt_notice': '如需使用已有字幕，请将 .srt 文件放在同目录下，文件名保持一致（如 video.mp4 → video.srt）。',
         'select_llm_provider': '选择用于分析的 AI 提供商',
@@ -390,7 +448,7 @@ DEFAULT_DATA = {
     'subtitle_style_background_style': 'none',
     'generate_cover': True,
     # Other form elements
-    'input_type': "Video URL",
+    'input_type': INPUT_TYPE_URL,
     'video_source': "",
     'llm_provider': DEFAULT_LLM_PROVIDER,
     'llm_provider_settings': build_default_llm_provider_settings(),
@@ -426,38 +484,47 @@ def load_from_file():
         if key not in saved:
             saved[key] = copy.deepcopy(value)
     backfill_llm_provider_settings(saved)
+    saved['input_type'] = normalize_input_type(saved.get('input_type'))
     return saved
 
-def save_to_file(data):
-    """Save data to file with atomic write to prevent corruption"""
-    import tempfile
-    import shutil
-    
-    # Write to a temporary file first
-    temp_fd, temp_path = tempfile.mkstemp(suffix='.json', dir=os.path.dirname(FILE_PATH))
-    try:
-        with os.fdopen(temp_fd, 'w') as f:
-            json.dump(data, f, indent=2)
-        # Atomic rename - only replace the original if write succeeded
-        shutil.move(temp_path, FILE_PATH)
-    except Exception as e:
-        # Clean up temp file if something went wrong
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
-        raise e
-# Load persistent data
-data = load_from_file()
+def _browser_preferences_bridge_script() -> str:
+    return """
+        const rootWindow = window.parent || window;
+        const currentUrl = new URL(rootWindow.location.href);
+    """
 
-# Initialize UI language if not present
-if 'ui_language' not in data:
-    data['ui_language'] = 'zh'
-    save_to_file(data)
 
-# Get current language
-current_lang = data.get('ui_language', 'zh')
-t = TRANSLATIONS[current_lang]
+def _render_browser_preferences_writer(payload: dict[str, Any]) -> None:
+    serialized = serialize_preferences_payload(payload)
+    bridge = _browser_preferences_bridge_script()
+    components.html(
+        f"""
+        <script>
+        {bridge}
+        rootWindow.document.cookie = {json.dumps(PREFERENCES_COOKIE_NAME)} + "=" + {json.dumps(serialized)} + "; path=/; max-age=31536000; SameSite=Lax";
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _render_browser_preferences_clearer() -> None:
+    bridge = _browser_preferences_bridge_script()
+    components.html(
+        f"""
+        <script>
+        {bridge}
+        rootWindow.document.cookie = {json.dumps(PREFERENCES_COOKIE_NAME)} + "=; path=/; max-age=0; SameSite=Lax";
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+# Load persistent data as startup seed only; browser sessions use their own runtime state.
+persisted_data = load_from_file()
 
 # Initialize reset counter in session state
 if 'reset_counter' not in st.session_state:
@@ -478,6 +545,36 @@ job_manager = get_job_manager()
 if 'processing_job_ids' not in st.session_state:
     st.session_state.processing_job_ids = []
     st.session_state.processing = False
+
+if 'browser_data' not in st.session_state:
+    st.session_state.browser_data = reset_browser_state(DEFAULT_DATA)
+
+if 'uploads_root' not in st.session_state:
+    st.session_state.uploads_root = str(uploads_root_for_output_dir(DEFAULT_DATA.get('output_dir', 'processed_videos')))
+
+if PREFERENCES_HYDRATED_FLAG not in st.session_state:
+    st.session_state[PREFERENCES_HYDRATED_FLAG] = False
+if 'remembered_preferences_payload' not in st.session_state:
+    st.session_state['remembered_preferences_payload'] = None
+if 'suspend_preference_writeback' not in st.session_state:
+    st.session_state['suspend_preference_writeback'] = False
+
+raw_preferences_cookie = st.context.cookies.get(PREFERENCES_COOKIE_NAME)
+if not st.session_state[PREFERENCES_HYDRATED_FLAG]:
+    payload = deserialize_preferences_payload(raw_preferences_cookie)
+    st.session_state[PREFERENCES_HYDRATED_FLAG] = True
+    if payload is not None:
+        st.session_state.browser_data = merge_browser_preferences(DEFAULT_DATA, st.session_state.browser_data, payload)
+        st.session_state['remembered_preferences_payload'] = raw_preferences_cookie
+        st.session_state['suspend_preference_writeback'] = False
+    else:
+        st.session_state['remembered_preferences_payload'] = None
+        st.session_state['suspend_preference_writeback'] = True
+
+data = st.session_state.browser_data
+current_lang = data.get('ui_language', 'zh')
+t = TRANSLATIONS[current_lang]
+current_owner_session_id = ensure_owner_session_id(st.query_params, st.session_state)
 
 # Don't auto-resume tracking on new tabs - let user choose via "Watch Progress" button
 # This allows each tab to track different jobs independently
@@ -586,76 +683,85 @@ def display_results(result):
         # Display output directory
         if output_dir:
             st.info(f"📁 All outputs saved to: {output_dir}")
+
+        editor_project = getattr(result, 'editor_project', None)
+        if editor_project and editor_project.get('project_id'):
+            st.header('🛠️ Clip Editor')
+            st.caption('Open the post-generation editor for timeline, subtitle, and cover-title adjustments.')
+            if st.button('🛠️ Open in Editor', key=f"open_editor_{editor_project.get('project_id')}"):
+                try:
+                    editor_url = ensure_editor_service(
+                        editor_project['project_id'],
+                        projects_root=editor_project.get('projects_root') or str(Path(editor_project['project_root']).parent),
+                        jobs_dir=str((Path.cwd() / 'jobs').resolve()),
+                        open_browser=False,
+                    )
+                    _show_editor_launch(editor_url)
+                except Exception as exc:
+                    st.warning(f'Editor unavailable: {exc}')
     else:
         st.error(f"{t['error']} {result.error_message}")
 
-# Custom CSS
-st.markdown("""
+
+def _is_editor_rerender_job(job) -> bool:
+    return (job.options or {}).get('kind') == 'editor_rerender'
+
+
+def _launch_editor_for_job(job) -> None:
+    project_id = (job.options or {}).get('project_id')
+    projects_root = (job.options or {}).get('projects_root') or str((Path.cwd() / 'processed_videos').resolve())
+    if not project_id:
+        st.warning('Editor project ID missing for this job.')
+        return
+    try:
+        editor_url = ensure_editor_service(
+            project_id,
+            projects_root=projects_root,
+            jobs_dir=str((Path.cwd() / 'jobs').resolve()),
+            open_browser=False,
+        )
+        _show_editor_launch(editor_url)
+    except Exception as exc:
+        st.warning(f'Editor unavailable: {exc}')
+
+# Custom CSS (Slate light theme polish — core palette lives in .streamlit/config.toml)
+st.markdown(
+    """
 <style>
-    .stProgress > div > div > div > div {
-        background-color: #4CAF50;
-    }
     .stButton > button {
-        background-color: #4CAF50;
-        color: white;
-        border-radius: 4px;
+        border-radius: 6px;
     }
-    .stFileUploader > label {
-        color: #333;
-        font-weight: bold;
-    }
-    .stTextInput > label {
-        font-weight: bold;
-    }
-    .stSelectbox > label {
-        font-weight: bold;
-    }
+    .stFileUploader > label,
+    .stTextInput > label,
+    .stSelectbox > label,
     .stCheckbox > label {
-        font-weight: bold;
+        font-weight: 600;
     }
-    /* Smaller font for clip preview checkboxes in the main area */
     .stMainBlockContainer .stCheckbox label p {
         font-size: 0.8rem !important;
     }
     .video-container {
         border-radius: 8px;
         overflow: hidden;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.08);
     }
-    .result-card {
-        border-radius: 8px;
-        padding: 16px;
-        margin: 8px 0;
-        background-color: #f9f9f9;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-    }
-    /* Reduce spacing between columns */
-    .stColumns > div {
-        gap: 0.25rem !important;
-    }
-    /* Target column containers directly */
-    .stColumn {
-        padding: 0 !important;
-        margin: 0 !important;
-    }
-    /* Reduce margin around videos */
+    .stColumns > div { gap: 0.25rem !important; }
+    .stColumn { padding: 0 !important; margin: 0 !important; }
     .stVideo {
         margin-bottom: 0.5rem !important;
         margin-right: 0 !important;
         margin-left: 0 !important;
     }
-    /* Reduce margin around text under videos */
     .stMarkdown {
         margin-bottom: 0.5rem !important;
         margin-right: 0 !important;
         margin-left: 0 !important;
     }
-    /* Reduce padding in expander content */
-    .streamlit-expanderContent {
-        padding: 0.5rem !important;
-    }
+    .streamlit-expanderContent { padding: 0.5rem !important; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # Title and description
 st.title("🎬 OpenClip")
@@ -678,21 +784,30 @@ with st.sidebar:
     new_lang = "zh" if ui_language == "中文" else "en"
     if new_lang != current_lang:
         data['ui_language'] = new_lang
-        save_to_file(data)
         st.rerun()
-    
+
     st.divider()
     
     # Video input options
+    upload_option_label = t.get('upload_file', 'Upload File')
+    server_path_option_label = t.get('server_file_path', 'Server File Path (host only)')
+    input_type_options = [
+        (INPUT_TYPE_URL, 'Video URL'),
+        (INPUT_TYPE_SERVER_PATH, server_path_option_label),
+        (INPUT_TYPE_UPLOAD, upload_option_label),
+    ]
+    current_input_type = normalize_input_type(data.get('input_type'))
     input_type = st.radio(
         t['input_type'],
-        options=["Video URL", "Local File"],
-        index=["Video URL", "Local File"].index(data['input_type']),
+        options=[value for value, _label in input_type_options],
+        format_func=lambda value: dict(input_type_options).get(value, value),
+        index=[value for value, _label in input_type_options].index(current_input_type),
         key=f"input_type_{st.session_state.reset_counter}"
     )
     data['input_type'] = input_type
-    
-    if input_type == "Video URL":
+
+    uploaded_file = None
+    if input_type == INPUT_TYPE_URL:
         video_source = st.text_input(
             t['video_url'],
             value=data['video_source'],
@@ -701,12 +816,22 @@ with st.sidebar:
             key=f"video_source_{st.session_state.reset_counter}"
         )
         data['video_source'] = video_source
+    elif input_type == INPUT_TYPE_UPLOAD:
+        uploaded_file = st.file_uploader(
+            upload_option_label,
+            type=sorted(ext.lstrip('.') for ext in VideoFileValidator.VIDEO_EXTENSIONS),
+            key=f"upload_file_{st.session_state.reset_counter}",
+            help=t.get('upload_file_help', 'Upload a video file from this browser. The file will be staged on the host until deleted.'),
+        )
+        video_source = uploaded_file.name if uploaded_file else ''
+        data['video_source'] = video_source
+        st.caption(t.get('upload_file_notice', 'Uploaded files are stored on the host until you delete them.'))
     else:
         video_source = st.text_input(
-            t['local_file_path'],
-            value="" if data['input_type'] != "Local File" else data.get('video_source', ""),
-            help=t['local_file_help'],
-            key=f"local_file_path_{st.session_state.reset_counter}"
+            server_path_option_label,
+            value=data.get('video_source', "") if current_input_type == INPUT_TYPE_SERVER_PATH else "",
+            help=t.get('server_file_help', 'Enter a full path on the host machine. This is intended for the server operator only.'),
+            key=f"server_file_path_{st.session_state.reset_counter}"
         )
         st.caption(t['local_file_srt_notice'])
         data['video_source'] = video_source
@@ -796,12 +921,8 @@ with st.sidebar:
     resolved_llm_model = (provider_settings['model'] or provider_default_model).strip()
     resolved_llm_base_url = (provider_settings['base_url'] or provider_default_base_url).strip()
 
-    if resolved_llm_model:
-        st.caption(f"ℹ️ Model: {resolved_llm_model}")
-    else:
-        st.caption(f"ℹ️ {t['llm_model_unset']}")
-    if resolved_llm_base_url:
-        st.caption(f"ℹ️ Base URL: {resolved_llm_base_url}")
+    if not resolved_llm_model:
+        st.warning(t['llm_model_unset'])
 
     # API key input (optional, since it can be set via environment variable)
     api_key_env_var = API_KEY_ENV_VARS.get(llm_provider, "QWEN_API_KEY")
@@ -1057,8 +1178,7 @@ with st.sidebar:
 
         st.caption(t['advanced_config_notice'])
 
-    # Save data to file
-    save_to_file(data)
+    # Browser runtime state lives in session state; do not persist peer changes globally.
     
     # ============================================================================
     # PROCESS VIDEO BUTTON (in sidebar)
@@ -1069,9 +1189,22 @@ with st.sidebar:
     resolved_api_key = api_key or os.getenv(api_key_env_var)
     requires_api_key = llm_provider != "custom_openai"
     
+    if st.session_state[PREFERENCES_HYDRATED_FLAG]:
+        preferences_payload = build_preferences_payload(data)
+        default_preferences_payload = build_preferences_payload(reset_browser_state(DEFAULT_DATA))
+        if st.session_state['suspend_preference_writeback']:
+            if preferences_payload != default_preferences_payload:
+                st.session_state['suspend_preference_writeback'] = False
+        if not st.session_state['suspend_preference_writeback']:
+            serialized_preferences_payload = serialize_preferences_payload(preferences_payload)
+            if serialized_preferences_payload != st.session_state['remembered_preferences_payload']:
+                _render_browser_preferences_writer(preferences_payload)
+                st.session_state['remembered_preferences_payload'] = serialized_preferences_payload
+
     # Check if we can process (allow concurrent jobs)
+    source_ready = bool(video_source) if input_type != INPUT_TYPE_UPLOAD else uploaded_file is not None
     can_process = bool(
-        video_source
+        source_ready
         and resolved_llm_model
         and resolved_llm_base_url
         and (resolved_api_key or not requires_api_key)
@@ -1096,10 +1229,12 @@ with st.sidebar:
     
     # Handle reset button
     if reset_clicked:
-        # Reset all data to defaults
-        for key, value in DEFAULT_DATA.items():
-            data[key] = copy.deepcopy(value)
-        save_to_file(data)
+        # Reset current form state and forget remembered browser preferences.
+        st.session_state.browser_data = reset_browser_state(DEFAULT_DATA)
+        st.session_state[PREFERENCES_HYDRATED_FLAG] = True
+        st.session_state['remembered_preferences_payload'] = None
+        st.session_state['suspend_preference_writeback'] = True
+        _render_browser_preferences_clearer()
         # Increment reset counter to force widget recreation
         st.session_state.reset_counter += 1
         # Force a rerun
@@ -1173,6 +1308,7 @@ def process_video_worker(job, progress_callback):
         'clip_generation': getattr(result, 'clip_generation', None),
         'post_processing': getattr(result, 'post_processing', None),
         'cover_generation': getattr(result, 'cover_generation', None),
+        'editor_project': getattr(result, 'editor_project', None),
     }
 
 
@@ -1194,118 +1330,166 @@ def handle_retry(job_id):
     else:
         st.session_state.retry_error = True
 
-# ============================================================================
-# JOB LIST SECTION
-# ============================================================================
-st.header("📋 Your Jobs")
+@st.fragment(run_every="2s")
+def render_runtime_dashboard():
+    uploads_root = Path(st.session_state.uploads_root)
 
-jobs = job_manager.list_jobs(limit=20)
+    completed_jobs = []
+    for job_id in st.session_state.processing_job_ids[:]:
+        job = job_manager.get_job(job_id)
+        if job and job.status.value in ['completed', 'failed', 'cancelled']:
+            completed_jobs.append(job)
+            st.session_state.processing_job_ids.remove(job_id)
 
-if jobs:
-    # Show stats
-    stats = job_manager.get_stats()
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total", stats['total'])
-    col2.metric("Processing", stats['processing'])
-    col3.metric("Completed", stats['completed'])
-    col4.metric("Failed", stats['failed'])
-    
+    for job in completed_jobs:
+        if job.status.value == 'completed':
+            st.success(f"✅ Job completed: {job.video_source[:50]}...")
+            if not _is_editor_rerender_job(job):
+                data['processing_result'] = job.result
+        elif job.status.value == 'failed':
+            st.error(f"❌ Job failed: {job.video_source[:50]}... - {job.error}")
+        elif job.status.value == 'cancelled':
+            st.warning(f"⏹️ Job cancelled: {job.video_source[:50]}...")
+
+    st.session_state.processing = len(st.session_state.processing_job_ids) > 0
+
+    owner_uploads = list_uploads_for_owner(uploads_root, current_owner_session_id)
+
+    st.header("📁 My Uploaded Files")
+    if owner_uploads:
+        for upload in owner_uploads:
+            upload_cols = st.columns([4, 2, 1])
+            with upload_cols[0]:
+                st.write(f"**{upload['original_filename']}**")
+                st.caption(Path(upload['staged_path']).name)
+            with upload_cols[1]:
+                st.caption(f"Created: {upload.get('created_at', 'unknown')}")
+                if not upload.get('exists', True):
+                    st.warning('Missing on disk')
+            with upload_cols[2]:
+                delete_disabled = job_manager.has_active_upload_reference(upload['upload_id'])
+                if st.button('🗑️ Delete Upload', key=f"delete_upload_{upload['upload_id']}", use_container_width=True, disabled=delete_disabled):
+                    job_manager.mark_upload_deleted(upload['upload_id'])
+                    delete_upload_record(upload)
+                    st.rerun()
+                if delete_disabled:
+                    st.caption('In use by an active job')
+    else:
+        st.info('No uploaded files for this browser session yet.')
+
     st.divider()
-    
-    # Show each job
-    for job in jobs:
-        status_emoji = {
-            'pending': '⏳',
-            'processing': '🔄',
-            'completed': '✅',
-            'failed': '❌',
-            'cancelled': '⏹️'
-        }.get(job.status.value, '❓')
-        
-        # Truncate video source for display
-        display_source = job.video_source if len(job.video_source) <= 60 else job.video_source[:57] + '...'
-        
-        with st.expander(f"{status_emoji} {job.status.value.upper()} - {display_source}", expanded=(job.status.value == 'processing')):
-            col1, col2, col3 = st.columns([2, 2, 1])
-            
-            with col1:
-                st.write(f"**Job ID:** `{job.id[:8]}...`")
-                st.write(f"**Created:** {job.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
-                
-                # Create a placeholder for duration to prevent ghost rendering
-                duration_placeholder = st.empty()
-                
-                # Only show duration for finished jobs
-                if job.status.value in ['completed', 'failed', 'cancelled']:
-                    if job.completed_at and job.started_at:
-                        duration = (job.completed_at - job.started_at).total_seconds()
-                        duration_placeholder.write(f"**Duration:** {duration:.1f}s")
-                else:
-                    # Explicitly clear the placeholder for processing/pending jobs
-                    duration_placeholder.empty()
-            
-            with col2:
-                if job.status.value == 'processing':
-                    st.progress(job.progress / 100)
-                    st.caption(f"{job.current_step}")
-                elif job.status.value == 'completed':
-                    st.success("Processing completed!")
-                    if job.result and job.result.get('processing_time'):
-                        st.write(f"**Time:** {job.result['processing_time']:.1f}s")
-                elif job.status.value == 'failed':
-                    st.error(f"Error: {job.error}")
-                elif job.status.value == 'cancelled':
-                    st.warning("Job was cancelled")
-            
-            with col3:
-                # Use placeholder to prevent ghost buttons
-                button_placeholder = st.empty()
-                
-                if job.status.value == 'completed':
-                    # Show View and Delete buttons
-                    with button_placeholder.container():
-                        if st.button("📊 View", key=f"view_{job.id}", use_container_width=True):
-                            # Load result and display
-                            data['processing_result'] = job.result
-                            save_to_file(data)
-                            st.rerun()
-                        if st.button("🗑️ Delete", key=f"delete_{job.id}", use_container_width=True):
-                            job_manager.delete_job(job.id)
-                            st.rerun()
-                elif job.status.value == 'processing':
-                    with button_placeholder.container():
-                        # Check if this job is being tracked
-                        is_tracked = job.id in st.session_state.processing_job_ids
-                        
-                        if is_tracked:
-                            # Show "Watching" indicator (disabled button)
-                            st.button("✓ Watching", key=f"watching_{job.id}", use_container_width=True, disabled=True)
-                        else:
-                            # Show "Watch Progress" button
-                            if st.button("👁️ Watch Progress", key=f"watch_{job.id}", use_container_width=True):
-                                # Start tracking this job
-                                st.session_state.processing_job_ids = [job.id]
-                                st.session_state.processing = True
-                                st.rerun()
-                        
-                        # Always show Cancel button
-                        if st.button("⏹️ Cancel", key=f"cancel_{job.id}", use_container_width=True):
-                            job_manager.cancel_job(job.id)
-                            st.rerun()
-                elif job.status.value in ['failed', 'cancelled', 'pending']:
-                    with button_placeholder.container():
-                        # Show Retry button for failed or cancelled jobs
-                        if job.status.value in ['failed', 'cancelled']:
-                            if st.button("🔄 Retry", key=f"retry_{job.id}", use_container_width=True, on_click=handle_retry, args=(job.id,)):
-                                pass  # Callback handles the retry
-                        
-                        if st.button("🗑️ Delete", key=f"delete_{job.id}", use_container_width=True):
-                            job_manager.delete_job(job.id)
-                            st.rerun()
-else:
-    st.info("No jobs yet. Process a video below to get started!")
+    st.header("📋 Your Jobs")
 
-st.divider()
+    jobs = job_manager.list_jobs(limit=20, owner_session_id=current_owner_session_id)
+
+    if jobs:
+        stats = job_manager.get_stats(owner_session_id=current_owner_session_id)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total", stats['total'])
+        col2.metric("Processing", stats['processing'])
+        col3.metric("Completed", stats['completed'])
+        col4.metric("Failed", stats['failed'])
+
+        st.divider()
+
+        for job in jobs:
+            is_editor_rerender = _is_editor_rerender_job(job)
+            status_emoji = {
+                'pending': '⏳',
+                'processing': '🔄',
+                'completed': '✅',
+                'failed': '❌',
+                'cancelled': '⏹️'
+            }.get(job.status.value, '❓')
+
+            display_source = job.video_source if len(job.video_source) <= 60 else job.video_source[:57] + '...'
+
+            with st.expander(f"{status_emoji} {job.status.value.upper()} - {display_source}", expanded=(job.status.value == 'processing')):
+                col1, col2, col3 = st.columns([2, 2, 1])
+
+                with col1:
+                    st.write(f"**Job ID:** `{job.id[:8]}...`")
+                    st.write(f"**Created:** {job.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                    duration_placeholder = st.empty()
+                    if job.status.value in ['completed', 'failed', 'cancelled']:
+                        if job.completed_at and job.started_at:
+                            duration = (job.completed_at - job.started_at).total_seconds()
+                            duration_placeholder.write(f"**Duration:** {duration:.1f}s")
+                    else:
+                        duration_placeholder.empty()
+
+                with col2:
+                    if job.status.value == 'processing':
+                        st.progress(job.progress / 100)
+                        st.caption(f"{job.current_step}")
+                    elif job.status.value == 'completed':
+                        st.success("Editor rerender completed!" if is_editor_rerender else "Processing completed!")
+                        if is_editor_rerender:
+                            operation = (job.options or {}).get('operation')
+                            clip_id = (job.options or {}).get('clip_id')
+                            if operation:
+                                st.write(f"**Operation:** {operation}")
+                            if clip_id:
+                                st.caption(f"Clip: {clip_id[:8]}...")
+                        elif job.result and job.result.get('processing_time'):
+                            st.write(f"**Time:** {job.result['processing_time']:.1f}s")
+                    elif job.status.value == 'failed':
+                        st.error(f"Error: {job.error}")
+                    elif job.status.value == 'cancelled':
+                        st.warning("Job was cancelled")
+
+                with col3:
+                    button_placeholder = st.empty()
+
+                    if job.status.value == 'completed':
+                        with button_placeholder.container():
+                            if is_editor_rerender:
+                                if st.button("🛠️ Open in Editor", key=f"open_editor_job_{job.id}", use_container_width=True):
+                                    _launch_editor_for_job(job)
+                            else:
+                                if st.button("📊 View", key=f"view_{job.id}", use_container_width=True):
+                                    data['processing_result'] = job.result
+                                    st.rerun()
+                            if st.button("🗑️ Delete", key=f"delete_{job.id}", use_container_width=True):
+                                job_manager.delete_job(job.id)
+                                st.rerun()
+                    elif job.status.value == 'processing':
+                        with button_placeholder.container():
+                            is_tracked = job.id in st.session_state.processing_job_ids
+
+                            if is_tracked:
+                                st.button("✓ Watching", key=f"watching_{job.id}", use_container_width=True, disabled=True)
+                            else:
+                                if st.button("👁️ Watch Progress", key=f"watch_{job.id}", use_container_width=True):
+                                    st.session_state.processing_job_ids = [job.id]
+                                    st.session_state.processing = True
+                                    st.rerun()
+
+                            if st.button("⏹️ Cancel", key=f"cancel_{job.id}", use_container_width=True):
+                                job_manager.cancel_job(job.id)
+                                st.rerun()
+                    elif job.status.value in ['failed', 'cancelled', 'pending']:
+                        with button_placeholder.container():
+                            if job.status.value in ['failed', 'cancelled']:
+                                source_deleted = bool((job.options or {}).get('source_deleted'))
+                                if st.button("🔄 Retry", key=f"retry_{job.id}", use_container_width=True, on_click=handle_retry, args=(job.id,), disabled=source_deleted):
+                                    pass
+                                if source_deleted:
+                                    st.caption('Retry unavailable: source upload was deleted.')
+
+                            if st.button("🗑️ Delete", key=f"delete_{job.id}", use_container_width=True):
+                                job_manager.delete_job(job.id)
+                                st.rerun()
+    else:
+        st.info("No jobs yet. Process a video below to get started!")
+
+    st.divider()
+
+    if completed_jobs:
+        st.rerun()
+
+
+render_runtime_dashboard()
 
 # ============================================================================
 # CUSTOM PROMPT EDITOR (if enabled)
@@ -1366,44 +1550,6 @@ if use_custom_prompt:
     st.divider()
 
 # ============================================================================
-# CHECK CURRENT JOB STATUS (must be before progress display)
-# ============================================================================
-# Check all processing jobs for completion
-completed_jobs = []
-for job_id in st.session_state.processing_job_ids[:]:  # Copy list to iterate safely
-    job = job_manager.get_job(job_id)
-    if job:
-        # Check if job finished
-        if job.status.value in ['completed', 'failed', 'cancelled']:
-            completed_jobs.append(job)
-            st.session_state.processing_job_ids.remove(job_id)
-
-# Show completion messages for finished jobs
-for job in completed_jobs:
-    if job.status.value == 'completed':
-        st.success(f"✅ Job completed: {job.video_source[:50]}...")
-        # Load result into saved results (only the last completed job)
-        data['processing_result'] = job.result
-        save_to_file(data)
-    elif job.status.value == 'failed':
-        st.error(f"❌ Job failed: {job.video_source[:50]}... - {job.error}")
-    elif job.status.value == 'cancelled':
-        st.warning(f"⏹️ Job cancelled: {job.video_source[:50]}...")
-
-# Update processing state
-st.session_state.processing = len(st.session_state.processing_job_ids) > 0
-
-# Rerun if we just completed jobs to update the UI
-if completed_jobs:
-    time.sleep(2)
-    st.rerun()
-
-# Auto-refresh while processing (at the end of script)
-if st.session_state.processing:
-    time.sleep(2)
-    st.rerun()
-
-# ============================================================================
 # BUTTON CLICK HANDLERS
 # ============================================================================
 
@@ -1420,8 +1566,14 @@ if getattr(st.session_state, 'retry_error', False):
 
 # --- Handle Start ---
 if process_clicked:
-    if not video_source:
-        st.error("Please provide a video URL or file path")
+    source_ready = bool(video_source) if input_type != INPUT_TYPE_UPLOAD else uploaded_file is not None
+    if not source_ready:
+        if input_type == INPUT_TYPE_UPLOAD:
+            st.error('Please choose a video file to upload')
+        elif input_type == INPUT_TYPE_SERVER_PATH:
+            st.error('Please provide a server file path')
+        else:
+            st.error('Please provide a video URL')
     elif not resolved_llm_model:
         st.error("Please provide an LLM model name or configure the provider default model")
     elif not resolved_llm_base_url:
@@ -1429,6 +1581,16 @@ if process_clicked:
     elif requires_api_key and not resolved_api_key:
         st.error(f"Please provide {llm_provider.upper()} API key or set the {api_key_env_var} environment variable")
     else:
+        source_kind = SOURCE_KIND_URL
+        upload_metadata = None
+        job_source = video_source
+        if input_type == INPUT_TYPE_UPLOAD:
+            upload_metadata = stage_uploaded_file(uploaded_file, uploads_root, current_owner_session_id)
+            job_source = upload_metadata['staged_path']
+            source_kind = SOURCE_KIND_UPLOADED_FILE
+        elif input_type == INPUT_TYPE_SERVER_PATH:
+            source_kind = SOURCE_KIND_SERVER_PATH
+
         # Create job options
         job_options = {
             'output_dir': output_dir,
@@ -1459,42 +1621,46 @@ if process_clicked:
             'subtitle_style_background_style': data.get('subtitle_style_background_style', 'none'),
             'user_intent': user_intent or None,
             'agentic_analysis': agentic_analysis,
+            'owner_session_id': current_owner_session_id,
+            'source_kind': source_kind,
+            'upload_id': upload_metadata['upload_id'] if upload_metadata else None,
+            'source_deleted': False,
         }
-        
+
         # Check if this is a Bilibili multi-part video
         created_job_ids = []
-        if is_bilibili_url(video_source):
+        if source_kind == SOURCE_KIND_URL and is_bilibili_url(job_source):
             with st.spinner("Checking for multi-part video..."):
                 parts = asyncio.run(get_bilibili_multi_parts(
-                    video_source,
+                    job_source,
                     browser=cookie_browser if cookie_mode == 'browser' else None,
                     cookies_file=(cookies_file or None) if cookie_mode == 'file' else None
                 ))
-            
+
             if parts and len(parts) > 1:
                 # Multi-part video detected, create a job for each part
                 st.info(f"📺 Detected multi-part video with {len(parts)} parts. Creating jobs for all parts...")
-                
+
                 for part in parts:
                     part_url = part['url']
                     part_options = job_options.copy()
                     # Append part info to output dir to keep them separate
                     part_options['output_dir'] = os.path.join(output_dir, f"P{part['index']}_{FileStringUtils.sanitize_filename(part['title'])[:30]}")
-                    
+
                     job_id = job_manager.create_job(part_url, part_options)
                     job_manager.start_job(job_id, process_video_worker)
                     created_job_ids.append(job_id)
-                
+
                 st.success(f"✅ Created {len(created_job_ids)} jobs for all parts!")
             else:
                 # Single video, create one job
-                job_id = job_manager.create_job(video_source, job_options)
+                job_id = job_manager.create_job(job_source, job_options)
                 job_manager.start_job(job_id, process_video_worker)
                 created_job_ids.append(job_id)
                 st.success(f"✅ Job started! ID: `{job_id[:8]}...`")
         else:
             # Not Bilibili, create single job
-            job_id = job_manager.create_job(video_source, job_options)
+            job_id = job_manager.create_job(job_source, job_options)
             job_manager.start_job(job_id, process_video_worker)
             created_job_ids.append(job_id)
             st.success(f"✅ Job started! ID: `{job_id[:8]}...`")
@@ -1529,28 +1695,39 @@ def _finalize_results(result):
             'clip_generation': getattr(result, 'clip_generation', None),
             'post_processing': getattr(result, 'post_processing', None),
             'cover_generation': getattr(result, 'cover_generation', None),
+            'editor_project': getattr(result, 'editor_project', None),
         }
     
     data['processing_result'] = result
-    save_to_file(data)
 
 # Display saved results if they exist and we didn't just process a video
 if data['processing_result'] and not just_processed:
-    st.header("📊 Saved Results")
+    header_col, action_col = st.columns([5, 1])
+    with header_col:
+        st.header("📊 Saved Results")
+    with action_col:
+        st.write("")
+        st.write("")
+        clear_saved_results = st.button("Clear Saved Results", key="clear_saved_results_header")
+    if 'success' not in data['processing_result']:
+        st.info("Saved results are only available for full processing jobs. Open editor rerender results from the job card instead.")
+        if clear_saved_results:
+            data['processing_result'] = None
+            st.rerun()
+    else:
     # Convert dictionary back to object-like structure
-    class ResultObject:
-        def __init__(self, data):
-            for key, value in data.items():
-                setattr(self, key, value)
+        class ResultObject:
+            def __init__(self, data):
+                for key, value in data.items():
+                    setattr(self, key, value)
 
-    result_obj = ResultObject(data['processing_result'])
-    display_results(result_obj)
-    
-    # Add a button to clear saved results
-    if st.button("Clear Saved Results"):
-        data['processing_result'] = None
-        save_to_file(data)
-        st.rerun()
+        result_obj = ResultObject(data['processing_result'])
+        display_results(result_obj)
+        
+        # Add a button to clear saved results
+        if clear_saved_results:
+            data['processing_result'] = None
+            st.rerun()
 
 # Footer
 st.markdown("""
@@ -1603,20 +1780,3 @@ with col2:
         </button>
     </a>
     """, unsafe_allow_html=True)
-
-# ============================================================================
-# AUTO-REFRESH WHILE PROCESSING
-# ============================================================================
-# This must be at the very end to refresh the entire page
-if st.session_state.processing:
-    # Track last refresh time to avoid too frequent updates
-    if 'last_refresh_time' not in st.session_state:
-        st.session_state.last_refresh_time = 0
-    
-    current_time = time.time()
-    time_since_refresh = current_time - st.session_state.last_refresh_time
-    
-    # Only refresh if at least 2 seconds have passed
-    if time_since_refresh >= 2:
-        st.session_state.last_refresh_time = current_time
-        st.rerun()

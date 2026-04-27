@@ -17,6 +17,9 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
 
 ## 📢 News
 
+- **2026-04-23**:
+  - Added a post-processing `Clip Editor` for per-clip boundary, subtitle, and cover-title adjustments, with support for speed-based rerendering
+  - Added an in-browser `File Upload` entry in Streamlit so local videos can be uploaded directly to create processing jobs; supports [LAN/shared-machine mode](#lan-shared-machine-mode)
 - **2026-04-19**:
   - Added `--deep-optimize` / Streamlit “Deep Optimize” mode: after candidate highlight aggregation, OpenClip runs extra AI review, boundary repair, and re-review steps to improve clip boundaries and standalone quality. See [With `--deep-optimize`](#with---deep-optimize)
 - **2026-04-04**:
@@ -27,15 +30,15 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
   - Added Streamlit UI support for one-click job creation for multi-part Bilibili videos, background job retry, and cancelling pending jobs after restart, thanks to [@xenoamess](https://github.com/xenoamess)
 - **2026-03-25**:
   - Added [Cookie Guidance](#cookie-guidance) and a clearer Streamlit `Cookie Mode`; for remote videos, try `No cookies` → `Browser cookies` → `Cookies file` in that order
+<details>
+<summary>Older updates</summary>
+
 - **2026-03-24**:
   - Added [GLM (ZhipuAI)](https://bigmodel.cn) and [MiniMax](https://minimaxi.com) as LLM providers — OpenClip now supports Qwen, OpenRouter, GLM, MiniMax, and `custom_openai`
 - **2026-03-11**:
   - OpenClip is now on skills.sh — install it as an Agent Skill via `npx skills add https://github.com/linzzzzzz/openclip --skill video-clip-extractor` and let your agent invoke it from any directory
 - **2026-03-08**:
   - Added `--user-intent` argument — tell the AI what you're looking for in natural language (e.g. `--user-intent "moments about AI risks"`); steers clip selection and ranking at both the per-part and aggregation stages
-<details>
-<summary>Older updates</summary>
-
 - **2026-03-04**:
   - **Git History Notice**: A mistaken attempt to reduce GitHub repo size caused the git history to be rewritten. Sorry for the inconvenience. Existing users need to run `git fetch origin && git reset --hard origin/main` to sync with the latest history
   - Added [subtitle burning](#subtitle-burning) — use `--burn-subtitles` to hard-burn SRT subtitles into clip videos; optionally add `--subtitle-translation "Simplified Chinese"` to burn bilingual subtitles (requires ffmpeg with libass)
@@ -205,6 +208,33 @@ uv run python -m streamlit run streamlit_app.py
 ```
 
 Once the app starts, open your browser and visit the displayed URL (typically `http://localhost:8501`).
+
+<a id="lan-shared-machine-mode"></a>
+<details>
+<summary>LAN/shared-machine mode</summary>
+
+To access Streamlit from another device on the same network and make "Open in Editor" show a reachable Clip Editor link:
+
+```bash
+export OPENCLIP_EDITOR_BASE_URL=http://HOST_LAN_IP:8765
+# Optional: explicitly set the editor service bind address and port
+export OPENCLIP_EDITOR_HOST=0.0.0.0
+export OPENCLIP_EDITOR_PORT=8765
+
+uv run python -m streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+On macOS, find the host machine's LAN IP with:
+
+```bash
+ipconfig getifaddr en0
+```
+
+Open `http://HOST_LAN_IP:8501` from another device on the same network. Clip Editor project URLs look like `http://HOST_LAN_IP:8765/projects/PROJECT_ID`.
+
+In LAN mode, "Open in Editor" shows an "Open Clip Editor" link in Streamlit instead of opening a browser tab on the server machine. If the link does not open, make sure both devices are on the same network and that firewall rules allow access to ports `8501` and `8765`.
+
+</details>
 
 **Usage Flow:**
 1. Select input type (Video URL or Local File) in the sidebar

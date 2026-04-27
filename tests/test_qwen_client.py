@@ -21,3 +21,20 @@ def test_qwen_client_preserves_explicit_full_endpoint(monkeypatch):
     )
 
     assert client.base_url == "https://qwen.example/custom/chat/completions"
+
+
+def test_qwen_client_preserves_explicit_zero_temperature():
+    client = QwenAPIClient(api_key="test-key")
+    captured = {}
+
+    def fake_make_request(payload, model):
+        captured["payload"] = payload
+        captured["model"] = model
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    client._make_request = fake_make_request
+
+    reply = client.simple_chat("translate this", temperature=0)
+
+    assert reply == "ok"
+    assert captured["payload"]["temperature"] == 0

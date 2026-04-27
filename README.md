@@ -17,6 +17,9 @@
 
 ## 📢 最新动态
 
+- **2026-04-23**:
+  - 新增后处理 `Clip Editor`：可对单个片段进行边界、字幕与封面标题的二次调整，并支持倍速重渲染
+  - Streamlit 新增浏览器内 `文件上传` 入口，可直接上传本地视频并创建处理任务；支持[局域网/共享机器模式](#lan-shared-machine-mode)
 - **2026-04-19**:
   - 新增 `--deep-optimize` / Streamlit「深度优化」模式：在候选片段汇总后增加一轮更深入的 AI 检查与边界修正，以提升片段边界质量和独立成段效果，详见[开启 `--deep-optimize` 时](#开启---deep-optimize-时)
 - **2026-04-04**:
@@ -27,15 +30,15 @@
   - 在 Streamlit UI 中支持 Bilibili 多 P 视频一键创建任务、后台任务重试，以及重启后取消 pending 任务，感谢 [@xenoamess](https://github.com/xenoamess)
 - **2026-03-25**:
   - 新增 [Cookie 使用建议](#cookie-guidance) 与更清晰的 Streamlit `Cookie 模式`；远程视频下载可按 `不使用 cookies` → `浏览器 cookies` → `Cookies 文件` 的顺序尝试
+<details>
+<summary>更早的更新</summary>
+
 - **2026-03-24**:
   - 新增 [GLM（智谱AI）](https://bigmodel.cn) 和 [MiniMax](https://minimaxi.com) 作为 LLM 提供商，现支持 Qwen、OpenRouter、GLM、MiniMax 与 `custom_openai`
 - **2026-03-11**:
   - OpenClip 现已上架 skills.sh，可通过 `npx skills add https://github.com/linzzzzzz/openclip --skill video-clip-extractor` 在任意目录安装为 Agent Skill，并让 Agent 调用
 - **2026-03-08**:
   - 新增 `--user-intent` 参数 — 用自然语言告诉 AI 你在找什么（如 `--user-intent "关于 AI 风险的观点"`），LLM 在片段筛选和排名时会优先考虑相关内容
-<details>
-<summary>更早的更新</summary>
-
 - **2026-03-04**:
   - **Git 历史变更通知**：错误的减小 GitHub size 的尝试导致 Git 历史被重写，对现有用户造成不便，深感抱歉。已有克隆用户需运行 `git fetch origin && git reset --hard origin/main` 以同步最新历史
   - 新增[字幕烧录功能](#subtitle-burning) — 使用 `--burn-subtitles` 将 SRT 字幕直接烧录到剪辑视频中；可选 `--subtitle-translation "Simplified Chinese"` 同时烧录中英双语字幕（需要带 libass 的 ffmpeg）
@@ -205,6 +208,33 @@ uv run python -m streamlit run streamlit_app.py
 ```
 
 应用启动后，打开浏览器访问显示的 URL（通常是 `http://localhost:8501`）。
+
+<a id="lan-shared-machine-mode"></a>
+<details>
+<summary>局域网/共享机器模式</summary>
+
+如果需要从同一局域网内的其他设备访问 Streamlit，并让「Open in Editor」显示可访问的 Clip Editor 链接：
+
+```bash
+export OPENCLIP_EDITOR_BASE_URL=http://HOST_LAN_IP:8765
+# 可选：显式指定编辑器服务监听地址与端口
+export OPENCLIP_EDITOR_HOST=0.0.0.0
+export OPENCLIP_EDITOR_PORT=8765
+
+uv run python -m streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+```
+
+可用以下命令查看 Mac 主机的局域网 IP：
+
+```bash
+ipconfig getifaddr en0
+```
+
+在另一台同网设备上打开 `http://HOST_LAN_IP:8501`。Clip Editor 项目地址形如 `http://HOST_LAN_IP:8765/projects/PROJECT_ID`。
+
+在局域网模式下，「Open in Editor」会在 Streamlit 中显示「Open Clip Editor」链接，而不会在服务器机器上自动打开浏览器标签页。如果链接无法打开，请确认两台设备在同一网络，并允许防火墙访问 `8501` 和 `8765` 端口。
+
+</details>
 
 **使用流程：**
 1. 在侧边栏选择输入类型（视频 URL 或本地文件）

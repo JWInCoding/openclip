@@ -143,7 +143,7 @@ class CustomOpenAIAPIClient:
                 "Set CUSTOM_OPENAI_MODEL or pass llm_model."
             )
         max_tokens = max_tokens or LLM_CONFIG["custom_openai"]["default_params"]["max_tokens"]
-        temperature = temperature or LLM_CONFIG["custom_openai"]["default_params"]["temperature"]
+        temperature = temperature if temperature is not None else LLM_CONFIG["custom_openai"]["default_params"]["temperature"]
         top_p = top_p or LLM_CONFIG["custom_openai"]["default_params"]["top_p"]
         stream = (
             stream
@@ -161,9 +161,14 @@ class CustomOpenAIAPIClient:
         }
         return self._make_request(payload)
 
-    def simple_chat(self, prompt: str, model: Optional[str] = None) -> str:
+    def simple_chat(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+    ) -> str:
         messages = [CustomOpenAIMessage(role="user", content=prompt)]
-        response = self.chat_completion(messages, model=model)
+        response = self.chat_completion(messages, model=model, temperature=temperature)
 
         try:
             message = response["choices"][0]["message"]
