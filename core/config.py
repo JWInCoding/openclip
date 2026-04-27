@@ -130,7 +130,7 @@ MAX_DURATION_MINUTES: float = 20.0
 
 # Whisper model for transcript generation
 # Options: tiny, base, small, medium, large, turbo
-WHISPER_MODEL: str = "base"
+WHISPER_MODEL: str = "large-v3-turbo"
 
 # Lightweight Whisper model used only for transcript language detection.
 # Keep this small because the full transcript backend is selected after detection.
