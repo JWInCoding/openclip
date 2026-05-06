@@ -62,7 +62,7 @@ LLM_CONFIG: Dict[str, Dict[str, Any]] = {
         "base_url": _env_llm_base_url("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"),
         # Old models (qwen-turbo, qwen-plus, qwen-max) use DashScope endpoint
         "legacy_base_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
-        "default_model": _env_llm_model("qwen", "qwen3.5-flash"),
+        "default_model": _env_llm_model("qwen", "qwen3.6-plus"),
         "default_params": {
             "max_tokens": 16384,
             "temperature": 0.7,

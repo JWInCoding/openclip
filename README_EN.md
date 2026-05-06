@@ -48,7 +48,7 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
   - Added [speaker identification (Preview)](#speaker-identification) — use `--speaker-references` to automatically label speakers by name in transcripts for interviews, panels, and podcasts
   - Improved AI prompts to reduce timestamp format confusion (e.g., `00:01:55` vs `01:55:00`)
 - **2025-02-26**:
-  - Switched default Qwen model from legacy qwen-turbo to qwen3.5-flash
+  - Switched default Qwen model from legacy qwen-turbo to qwen3.6-plus
   - Improved AI prompts to reduce timestamp hallucination and enhance title quality
 
 </details>
@@ -97,7 +97,7 @@ Give it a video URL or local file, and it handles the full pipeline: **Download 
   </details>
 
 - **LLM API Key / Endpoint Config** (choose one)
-  - **Qwen API Key** - Get your key from [Alibaba Cloud](https://dashscope.aliyun.com/) (uses qwen3.5-flash model by default)
+  - **Qwen API Key** - Get your key from [Alibaba Cloud](https://dashscope.aliyun.com/) (uses qwen3.6-plus model by default)
   - **OpenRouter API Key** - Get your key from [OpenRouter](https://openrouter.ai/) (uses stepfun/step-3.5-flash:free model by default)
   - **GLM API Key** - Get your key from [ZhipuAI](https://open.bigmodel.cn/) (uses glm-4.7 model by default)
   - **MiniMax API Key** - Get your key from [MiniMax](https://platform.minimaxi.com/) (uses MiniMax-M2.7 model by default)

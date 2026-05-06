@@ -48,7 +48,7 @@
   - 新增[说话人识别功能（预览版）](#speaker-identification)— 使用 `--speaker-references` 为访谈/座谈/播客视频自动标注说话人姓名
   - 优化 AI 提示词，减少时间戳格式混淆（如 `00:01:55` vs `01:55:00`）
 - **2025-02-26**:
-  - 默认 Qwen 模型从旧版 qwen-turbo 切换至 qwen3.5-flash
+  - 默认 Qwen 模型从旧版 qwen-turbo 切换至 qwen3.6-plus
   - 优化 AI 提示词，减少时间戳幻觉，提升标题质量
 
 </details>
@@ -94,7 +94,7 @@
   </details>
 
 - **LLM API Key / 接口配置**（选择其一）
-  - **Qwen API Key** - 从[阿里云](https://dashscope.aliyun.com/)获取密钥（默认使用 qwen3.5-flash 模型）
+  - **Qwen API Key** - 从[阿里云](https://dashscope.aliyun.com/)获取密钥（默认使用 qwen3.6-plus 模型）
   - **OpenRouter API Key** - 从[OpenRouter](https://openrouter.ai/)获取密钥（默认使用 stepfun/step-3.5-flash:free 模型）
   - **GLM API Key** - 从[智谱AI](https://open.bigmodel.cn/)获取密钥（默认使用 glm-4.7 模型）
   - **MiniMax API Key** - 从[MiniMax](https://platform.minimaxi.com/)获取密钥（默认使用 MiniMax-M2.7 模型）

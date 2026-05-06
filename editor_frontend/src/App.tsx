@@ -120,6 +120,16 @@ function buildPreviewWindow(clip?: ClipDraft, projectSourceVideoUrl?: string): P
   }
 }
 
+function loadFailureMessage(error: unknown, projectId: string): UiText {
+  if (error instanceof Error && error.message === loadProjectFailedError) {
+    return message('unableLoadManifestProject', { projectId })
+  }
+  if (error instanceof Error) {
+    return rawMessage(error.message)
+  }
+  return message('unableLoadProject')
+}
+
 function subtitleTextareaRows(text: string): number {
   const estimatedRows = text.split('\n').reduce((rows, line) => {
     return rows + Math.max(1, Math.ceil(Math.max(line.length, 1) / 56))
@@ -134,9 +144,8 @@ function App() {
   const [activeClipId, setActiveClipId] = useState('')
   const [activityLog, setActivityLog] = useState<UiText[]>([])
   const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<UiText | null>(null)
   const [statusMessage, setStatusMessage] = useState<UiText>(message('loadingEditorProject'))
-  const [previewWindow, setPreviewWindow] = useState<PreviewWindow | null>(null)
   const [dragHandle, setDragHandle] = useState<'start' | 'end' | null>(null)
   const [theme, setTheme] = useState<EditorTheme>(loadInitialTheme)
   const [locale, setLocale] = useState<Locale>(loadInitialLocale)
@@ -153,6 +162,10 @@ function App() {
   const subtitlePreviewUrl = withVersionToken(activeClip?.currentComposedClipUrl, activeClip?.updatedAt)
   const horizontalCoverPreviewUrl = withVersionToken(activeClip?.horizontalCoverUrl, activeClip?.updatedAt)
   const verticalCoverPreviewUrl = withVersionToken(activeClip?.verticalCoverUrl, activeClip?.updatedAt)
+  const previewWindow = useMemo(
+    () => buildPreviewWindow(activeClip, draftProject.sourceVideoUrl),
+    [activeClip, draftProject.sourceVideoUrl],
+  )
   const activeDirtyState = activeClip && savedActiveClip ? getDirtyState(savedActiveClip, activeClip) : emptyDirtyState
   const activePartStart = activeClip?.partAbsoluteStart ?? 0
   const activePartEnd = activeClip?.partAbsoluteEnd ?? draftProject.totalDuration
@@ -175,7 +188,6 @@ function App() {
     setSavedProject(result.project)
     setDraftProject(result.project)
     setActiveClipId(targetClip?.id ?? '')
-    setPreviewWindow(buildPreviewWindow(targetClip, result.project.sourceVideoUrl))
     setStatusMessage(result.statusMessage)
     setLoadError(null)
     pushLog(result.logMessage)
@@ -207,15 +219,11 @@ function App() {
         }
       } catch (error) {
         if (!cancelled) {
-          const nextMessage = error instanceof Error && error.message === loadProjectFailedError
-            ? t(locale, 'unableLoadManifestProject', { projectId })
-            : error instanceof Error
-              ? error.message
-              : t(locale, 'unableLoadProject')
+          const nextMessage = loadFailureMessage(error, projectId)
           setLoadError(nextMessage)
-          setStatusMessage(rawMessage(nextMessage))
+          setStatusMessage(nextMessage)
           setLoading(false)
-          pushLog(rawMessage(nextMessage))
+          pushLog(nextMessage)
         }
       }
     }
@@ -270,11 +278,6 @@ function App() {
           clip.id === activeClip.id ? { ...clip, start: clamped.start, end: clamped.end, coverDirty: true } : clip
         )),
       }))
-      setPreviewWindow({
-        start: clamped.start,
-        end: clamped.end,
-        sourceVideoUrl: activeClip.sourceVideoUrl ?? draftProject.sourceVideoUrl,
-      })
     }
 
     function handlePointerUp() {
@@ -287,20 +290,7 @@ function App() {
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', handlePointerUp)
     }
-  }, [activeClip, dragHandle, draftProject.totalDuration, draftProject.sourceVideoUrl])
-
-  useEffect(() => {
-    if (dragHandle) {
-      return
-    }
-    const nextPreviewWindow = buildPreviewWindow(activeClip, draftProject.sourceVideoUrl)
-    const isSynced = previewWindow?.start === nextPreviewWindow?.start
-      && previewWindow?.end === nextPreviewWindow?.end
-      && previewWindow?.sourceVideoUrl === nextPreviewWindow?.sourceVideoUrl
-    if (!isSynced) {
-      setPreviewWindow(nextPreviewWindow)
-    }
-  }, [activeClip, dragHandle, draftProject.sourceVideoUrl, previewWindow])
+  }, [activeClip, activePartEnd, activePartStart, dragHandle, draftProject.totalDuration])
 
   useEffect(() => {
     if (!previewVideoRef.current || !previewWindow) {
@@ -435,11 +425,6 @@ function App() {
       end: clamped.end,
       coverDirty: true,
     }))
-    setPreviewWindow({
-      start: clamped.start,
-      end: clamped.end,
-      sourceVideoUrl: activeClip.sourceVideoUrl ?? draftProject.sourceVideoUrl,
-    })
   }
 
   async function patchClip(clip: ClipDraft) {
@@ -517,11 +502,6 @@ function App() {
     const savedClip = savedClipMap.get(activeClip.id)
     if (!savedClip) return
     updateClip(activeClip.id, () => ({ ...savedClip }))
-    setPreviewWindow({
-      start: savedClip.start,
-      end: savedClip.end,
-      sourceVideoUrl: savedClip.sourceVideoUrl ?? draftProject.sourceVideoUrl,
-    })
     pushLog(message('resetClipLog', { title: activeClip.title }))
   }
 
@@ -625,7 +605,7 @@ function App() {
               <div>
                 <p className="eyebrow">{t(locale, 'openClipEditor')}</p>
                 <h2>{t(locale, 'editorUnavailable')}</h2>
-                <p className="muted">{loadError}</p>
+                <p className="muted">{resolveText(loadError)}</p>
               </div>
             </div>
             <footer className="editor-actions">
@@ -633,15 +613,11 @@ function App() {
                 setLoading(true)
                 setLoadError(null)
                 void loadProject().then(applyLoadedProject).catch((error) => {
-                  const nextMessage = error instanceof Error && error.message === loadProjectFailedError
-                    ? t(locale, 'unableLoadManifestProject', { projectId })
-                    : error instanceof Error
-                      ? error.message
-                      : t(locale, 'unableLoadProject')
+                  const nextMessage = loadFailureMessage(error, projectId)
                   setLoadError(nextMessage)
-                  setStatusMessage(rawMessage(nextMessage))
+                  setStatusMessage(nextMessage)
                   setLoading(false)
-                  pushLog(rawMessage(nextMessage))
+                  pushLog(nextMessage)
                 })
               }}>{t(locale, 'retryLoad')}</button>
             </footer>
@@ -764,14 +740,7 @@ function App() {
               const dirtyState = getDirtyState(savedClipMap.get(clip.id) ?? clip, clip)
               const isActive = clip.id === activeClip.id
               return (
-                <button key={clip.id} type="button" className={`clip-card ${isActive ? 'clip-card--active' : ''}`} onClick={() => {
-                  setActiveClipId(clip.id)
-                  setPreviewWindow({
-                    start: clip.start,
-                    end: clip.end,
-                    sourceVideoUrl: clip.sourceVideoUrl ?? draftProject.sourceVideoUrl,
-                  })
-                }}>
+                <button key={clip.id} type="button" className={`clip-card ${isActive ? 'clip-card--active' : ''}`} onClick={() => setActiveClipId(clip.id)}>
                   <div className="clip-card__topline"><span className="clip-card__index">#{clip.order}</span><span className={`pill ${dirtyState.hasChanges || clip.coverDirty ? 'pill--warning' : 'pill--neutral'}`}>{getDirtyStateLabel({ ...dirtyState, coverNeedsRefresh: Boolean(clip.coverDirty) || dirtyState.coverNeedsRefresh })}</span></div>
                   <strong>{clip.title}</strong>
                   <p>{clip.sourcePart ? `${clip.sourcePart} · ${t(locale, 'localLabel')} ${clip.localTimeRange}` : clip.localTimeRange}</p>
