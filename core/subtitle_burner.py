@@ -651,11 +651,11 @@ class SubtitleBurner:
         cleaned = text.strip()
         candidates = [cleaned]
 
-        fenced_json = re.search(r"```json\s*(\[.*?\])\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+        fenced_json = re.search(r"```json\s*(\[.*\])\s*```", cleaned, re.DOTALL | re.IGNORECASE)
         if fenced_json:
             candidates.append(fenced_json.group(1))
 
-        fenced = re.search(r"```\s*(\[.*?\])\s*```", cleaned, re.DOTALL)
+        fenced = re.search(r"```\s*(\[.*\])\s*```", cleaned, re.DOTALL)
         if fenced:
             candidates.append(fenced.group(1))
 
