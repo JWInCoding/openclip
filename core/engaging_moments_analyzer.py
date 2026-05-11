@@ -79,11 +79,19 @@ class EngagingMomentsAnalyzer:
             resolved_base_url = self.base_url or LLM_CONFIG["deepseek"]["base_url"]
             self.llm_client = CustomOpenAIAPIClient(resolved_api_key, base_url=resolved_base_url)
             self.llm_client.default_model = self.model or LLM_CONFIG["deepseek"]["default_model"]
+        elif self.provider.startswith("sencenova"):
+            import os
+            from core.config import API_KEY_ENV_VARS
+            from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
+            resolved_api_key = api_key or os.getenv(API_KEY_ENV_VARS.get(self.provider, "SENSENOVA_API_KEY"))
+            resolved_base_url = self.base_url or LLM_CONFIG[self.provider]["base_url"]
+            self.llm_client = CustomOpenAIAPIClient(resolved_api_key, base_url=resolved_base_url)
+            self.llm_client.default_model = self.model or LLM_CONFIG[self.provider]["default_model"]
         elif self.provider == "custom_openai":
             from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
             self.llm_client = CustomOpenAIAPIClient(api_key, base_url=self.base_url)
         else:
-            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', 'glm', 'minimax', 'deepseek', and 'custom_openai'.")
+            raise ValueError(f"Unsupported provider: {provider}. Supported providers are 'qwen', 'openrouter', 'glm', 'minimax', 'deepseek', 'sencenova_*', and 'custom_openai'.")
         
         # Load background information if enabled
         if self.use_background:

@@ -51,6 +51,9 @@ SUPPORTED_LLM_PROVIDERS = (
     "glm",
     "minimax",
     "deepseek",
+    "sencenova_deepseek",
+    "sencenova_flash_lite",
+    "sencenova_u1_fast",
     "custom_openai",
 )
 
@@ -112,6 +115,36 @@ LLM_CONFIG: Dict[str, Dict[str, Any]] = {
             "stream": False
         }
     },
+    "sencenova_deepseek": {
+        "base_url": _env_llm_base_url("sencenova", "https://token.sensenova.cn/v1"),
+        "default_model": _env_llm_model("sencenova", "deepseek-v4-flash"),
+        "default_params": {
+            "max_tokens": 32768,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "stream": False
+        }
+    },
+    "sencenova_flash_lite": {
+        "base_url": _env_llm_base_url("sencenova", "https://token.sensenova.cn/v1"),
+        "default_model": _env_llm_model("sencenova", "sensenova-6.7-flash-lite"),
+        "default_params": {
+            "max_tokens": 32768,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "stream": False
+        }
+    },
+    "sencenova_u1_fast": {
+        "base_url": _env_llm_base_url("sencenova", "https://token.sensenova.cn/v1"),
+        "default_model": _env_llm_model("sencenova", "sensenova-u1-fast"),
+        "default_params": {
+            "max_tokens": 32768,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "stream": False
+        }
+    },
     "custom_openai": {
         "base_url": _env_llm_base_url("custom_openai", "https://api.openai.com/v1/chat/completions"),
         "default_model": _env_llm_model("custom_openai", ""),
@@ -132,12 +165,15 @@ API_KEY_ENV_VARS: Dict[str, str] = {
     "glm": "GLM_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY_OPENCLIP",
+    "sencenova_deepseek": "SENSENOVA_API_KEY",
+    "sencenova_flash_lite": "SENSENOVA_API_KEY",
+    "sencenova_u1_fast": "SENSENOVA_API_KEY",
     "custom_openai": "CUSTOM_OPENAI_API_KEY",
 }
 
 
 # Default LLM provider
-DEFAULT_LLM_PROVIDER: str = "deepseek"
+DEFAULT_LLM_PROVIDER: str = "sencenova_deepseek"
 
 # Video splitting
 MAX_DURATION_MINUTES: float = 20.0

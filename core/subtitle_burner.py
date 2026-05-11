@@ -226,6 +226,14 @@ class SubtitleBurner:
                 resolved_base_url = base_url or LLM_CONFIG["deepseek"]["base_url"]
                 self.client = CustomOpenAIAPIClient(resolved_api_key, base_url=resolved_base_url)
                 self.client.default_model = model or LLM_CONFIG["deepseek"]["default_model"]
+            elif provider.startswith("sencenova"):
+                import os
+                from core.config import API_KEY_ENV_VARS, LLM_CONFIG
+                from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
+                resolved_api_key = api_key or os.getenv(API_KEY_ENV_VARS.get(provider, "SENSENOVA_API_KEY"))
+                resolved_base_url = base_url or LLM_CONFIG[provider]["base_url"]
+                self.client = CustomOpenAIAPIClient(resolved_api_key, base_url=resolved_base_url)
+                self.client.default_model = model or LLM_CONFIG[provider]["default_model"]
             elif provider == "custom_openai":
                 from core.llm.custom_openai_api_client import CustomOpenAIAPIClient
                 self.client = CustomOpenAIAPIClient(api_key=api_key, base_url=base_url)
