@@ -358,15 +358,17 @@ class ClipGenerator:
         return 0
 
     def _parse_time_flexible(self, time_str: str) -> float:
-        """Parse time string in HH:MM:SS, MM:SS, or HH:MM:SS.mmm format to seconds."""
+        """Parse time string in HH:MM:SS, MM:SS, HH:MM:SS.mmm, or HH:MM:SS,mmm format to seconds."""
+        # Normalize SRT comma separator to dot
+        normalized = time_str.replace(',', '.')
         # Handle HH:MM:SS.mmm (ffmpeg-style with dot)
-        if '.' in time_str:
-            main, ms = time_str.rsplit('.', 1)
+        if '.' in normalized:
+            main, ms = normalized.rsplit('.', 1)
             parts = main.split(':')
             base = sum(int(p) * m for p, m in zip(parts, [3600, 60, 1][-len(parts):]))
             return base + int(ms) / 1000.0
         # Handle HH:MM:SS or MM:SS
-        parts = time_str.split(':')
+        parts = normalized.split(':')
         return float(sum(int(p) * m for p, m in zip(parts, [3600, 60, 1][-len(parts):])))
 
     def _seconds_to_ffmpeg_time(self, seconds: float) -> str:
