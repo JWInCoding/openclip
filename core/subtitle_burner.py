@@ -785,6 +785,123 @@ class SubtitleBurner:
         )
         return None
 
+    @staticmethod
+    def _srt_ts_to_ms(ts: str) -> int:
+        h, m, s_ms = ts.split(":")
+        s, ms = s_ms.split(",")
+        return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+
+    _MAX_VERIFY_RETRIES = 3
+
+    def verify_and_split_subtitles(self, srt_path: Path) -> bool:
+        """Use LLM to verify subtitle segments and split overly long ones semantically.
+
+        Returns True if any segments were split, False otherwise.
+        On failure the original SRT is preserved unchanged.
+        """
+        if not self.client:
+            return False
+
+        segments = self._parse_srt(srt_path)
+        if not segments:
+            return False
+
+        has_long = False
+        for seg in segments:
+            duration_ms = self._srt_ts_to_ms(seg["end"]) - self._srt_ts_to_ms(seg["start"])
+            if duration_ms > 8000 or len(seg["text"]) > 80:
+                has_long = True
+                break
+        if not has_long:
+            return False
+
+        numbered = [
+            {"id": i, "start": seg["start"], "end": seg["end"],
+             "text": seg["text"].replace(chr(10), " ").strip()}
+            for i, seg in enumerate(segments, 1)
+        ]
+        n = len(segments)
+        prompt = (
+            "You are a subtitle editor. Analyze the following subtitle segments.\n"
+            "For any segment longer than 8 seconds or containing more than 80 English characters,\n"
+            "split it into shorter segments at natural semantic boundaries (commas, clause breaks, pauses).\n\n"
+            "Input JSON:\n"
+            f"{json.dumps(numbered, ensure_ascii=False)}\n\n"
+            "Rules:\n"
+            "- Return valid JSON only.\n"
+            "- Short segments that are fine should be kept as-is with the same id.\n"
+            "- Long segments should be split into multiple entries. Use the original id for the first\n"
+            "  piece, then add suffixes: e.g. id 3 becomes 3, 3.1, 3.2.\n"
+            "- Each entry must have \"id\", \"start\", \"end\", \"text\" fields.\n"
+            "- Preserve the original start of the first piece and end of the last piece.\n"
+            "- Sub-piece timestamps must be contiguous (no gaps, no overlaps).\n"
+            "- Keep the original language. Do not translate.\n"
+            "- Do not add commentary or markdown.\n\n"
+            "Return format: "
+            '[{"id": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": "..."}, ...]'
+        )
+
+        _ts_re = re.compile(r"^\d{2}:\d{2}:\d{2},\d{3}$")
+        last_preview = ""
+        for attempt in range(1, self._MAX_VERIFY_RETRIES + 1):
+            response = ""
+            try:
+                response = self.client.simple_chat(prompt, model=self.model, temperature=0)
+                parsed = self._extract_json_array(response)
+                if parsed is None:
+                    raise ValueError("no JSON array in response")
+
+                result_segments = []
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        raise ValueError(f"non-dict item: {item}")
+                    for key in ("id", "start", "end", "text"):
+                        if key not in item:
+                            raise ValueError(f"missing key '{key}' in {item}")
+                    start = str(item["start"]).replace(".", ",")
+                    end = str(item["end"]).replace(".", ",")
+                    if not _ts_re.match(start) or not _ts_re.match(end):
+                        raise ValueError(f"bad timestamp format: {start} / {end}")
+                    result_segments.append({
+                        "start": start,
+                        "end": end,
+                        "text": item["text"],
+                    })
+
+                if not result_segments:
+                    raise ValueError("empty result")
+
+                changed = len(result_segments) != n
+                if not changed:
+                    for orig, new in zip(segments, result_segments):
+                        if orig["text"].strip() != new["text"].strip():
+                            changed = True
+                            break
+
+                if not changed:
+                    logger.info(f"[subtitle verify] all {n} segments OK, no splits needed")
+                    return False
+
+                self._write_srt_segments(srt_path, result_segments)
+                logger.info(
+                    f"[subtitle verify] split {n} segments into {len(result_segments)} "
+                    f"(attempt {attempt})"
+                )
+                return True
+
+            except Exception as e:
+                last_preview = response[:800].replace("\n", "\\n") if response else ""
+                logger.warning(
+                    f"[subtitle verify] attempt {attempt}/{self._MAX_VERIFY_RETRIES} "
+                    f"failed ({e}); retrying."
+                )
+
+        logger.warning(
+            f"[subtitle verify] all {self._MAX_VERIFY_RETRIES} attempts failed; "
+            f"keeping original SRT. Last response preview: {last_preview!r}"
+        )
+        return False
+
     def _srt_time_to_ass(self, t: str) -> str:
         """Convert SRT time 'HH:MM:SS,mmm' to ASS time 'H:MM:SS.cc'."""
         h, m, s_ms = t.split(":")

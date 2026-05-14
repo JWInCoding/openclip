@@ -522,6 +522,20 @@ class VideoOrchestrator:
                         else:
                             logger.warning(f"  ⚠ Transcription failed for {_clip_mp4.name}, clip will have no subtitles")
 
+                    # Step 5.6: AI subtitle verification — split overly long segments
+                    logger.info(f"🔍 Step 5.6: Verifying subtitle segments with AI...")
+                    for _i, _filename in enumerate(_clip_filenames, 1):
+                        _clip_mp4 = _source_clips_dir / _filename
+                        _srt = _clip_mp4.with_suffix(".srt")
+                        if not _srt.exists():
+                            continue
+                        try:
+                            _split = self.subtitle_burner.verify_and_split_subtitles(_srt)
+                            if _split:
+                                logger.info(f"  [{_i}/{_n}] ✓ Split long segments in {_srt.name}")
+                        except Exception as e:
+                            logger.warning(f"  [{_i}/{_n}] ⚠ Verify failed for {_srt.name}: {e}")
+
                 # Step 6: Post-processing (titles and/or subtitles) → clips_post_processed/
                 has_titles    = self.title_adder is not None
                 has_subtitles = self.subtitle_burner is not None
