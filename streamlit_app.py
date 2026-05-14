@@ -118,6 +118,7 @@ def render_subtitle_style_preview(
     font_size: str,
     vertical_position: str,
     background_style: str,
+    bilingual_layout: str,
     subtitle_translation: Optional[str],
     ui_language: str,
 ) -> bytes | None:
@@ -136,7 +137,7 @@ def render_subtitle_style_preview(
             preset=preset,
             font_size=font_size,
             vertical_position=vertical_position,
-            bilingual_layout="auto",
+            bilingual_layout=bilingual_layout,
             background_style=background_style,
         )
     )
@@ -270,6 +271,7 @@ TRANSLATIONS = {
         'subtitle_style_font_size': 'Subtitle Size',
         'subtitle_style_vertical_position': 'Vertical Position',
         'subtitle_style_background_style': 'Background Style',
+        'subtitle_style_bilingual_layout': 'Bilingual Layout',
         'subtitle_preview': 'Subtitle Preview',
         'subtitle_preview_help': 'Preview uses a built-in 1920x1080 sample background and the same ASS styling path as final burning.',
         'subtitle_preview_failed': 'Preview could not be rendered. Please verify ffmpeg with libass is available.',
@@ -386,6 +388,7 @@ TRANSLATIONS = {
         'subtitle_style_font_size': '字幕大小',
         'subtitle_style_vertical_position': '垂直位置',
         'subtitle_style_background_style': '背景样式',
+        'subtitle_style_bilingual_layout': '双语布局',
         'subtitle_preview': '字幕预览',
         'subtitle_preview_help': '预览使用内置 1920x1080 示例背景，并复用最终字幕烧录的 ASS 样式路径。',
         'subtitle_preview_failed': '字幕预览生成失败，请确认 ffmpeg 已包含 libass。',
@@ -446,6 +449,7 @@ DEFAULT_DATA = {
     'subtitle_style_font_size': 'medium',
     'subtitle_style_vertical_position': 'bottom',
     'subtitle_style_background_style': 'none',
+    'subtitle_style_bilingual_layout': 'auto',
     'generate_cover': True,
     # Other form elements
     'input_type': INPUT_TYPE_URL,
@@ -1057,6 +1061,11 @@ with st.sidebar:
                 'solid_box': '实心底框',
             },
         }
+        subtitle_bilingual_layout_values = ['auto', 'bilingual', 'original_only']
+        subtitle_bilingual_layout_labels = {
+            'en': {'auto': 'Auto', 'bilingual': 'Bilingual', 'original_only': 'Translation Only'},
+            'zh': {'auto': '自动', 'bilingual': '双语', 'original_only': '仅翻译'},
+        }
 
         subtitle_style_preset = st.selectbox(
             t['subtitle_style_preset'],
@@ -1090,11 +1099,20 @@ with st.sidebar:
             format_func=lambda value: subtitle_background_labels[current_lang][value],
             key=f"subtitle_style_background_style_{st.session_state.reset_counter}"
         )
+        subtitle_style_bilingual_layout = st.selectbox(
+            t['subtitle_style_bilingual_layout'],
+            options=subtitle_bilingual_layout_values,
+            index=subtitle_bilingual_layout_values.index(data.get('subtitle_style_bilingual_layout', 'auto'))
+            if data.get('subtitle_style_bilingual_layout', 'auto') in subtitle_bilingual_layout_values else 0,
+            format_func=lambda value: subtitle_bilingual_layout_labels[current_lang][value],
+            key=f"subtitle_style_bilingual_layout_{st.session_state.reset_counter}"
+        )
 
         data['subtitle_style_preset'] = subtitle_style_preset
         data['subtitle_style_font_size'] = subtitle_style_font_size
         data['subtitle_style_vertical_position'] = subtitle_style_vertical_position
         data['subtitle_style_background_style'] = subtitle_style_background_style
+        data['subtitle_style_bilingual_layout'] = subtitle_style_bilingual_layout
 
         st.caption(t['subtitle_preview_help'])
         preview_bytes = render_subtitle_style_preview(
@@ -1102,6 +1120,7 @@ with st.sidebar:
             subtitle_style_font_size,
             subtitle_style_vertical_position,
             subtitle_style_background_style,
+            subtitle_style_bilingual_layout,
             subtitle_translation,
             current_lang,
         )
@@ -1116,6 +1135,7 @@ with st.sidebar:
         data['subtitle_style_font_size'] = 'medium'
         data['subtitle_style_vertical_position'] = 'bottom'
         data['subtitle_style_background_style'] = 'none'
+        data['subtitle_style_bilingual_layout'] = 'auto'
 
     with st.expander(t['advanced_options']):
         add_titles = st.checkbox(
@@ -1279,7 +1299,7 @@ def process_video_worker(job, progress_callback):
         subtitle_style_preset=options.get('subtitle_style_preset', 'default'),
         subtitle_style_font_size=options.get('subtitle_style_font_size', 'medium'),
         subtitle_style_vertical_position=options.get('subtitle_style_vertical_position', 'bottom'),
-        subtitle_style_bilingual_layout='auto',
+        subtitle_style_bilingual_layout=options.get('subtitle_style_bilingual_layout', 'auto'),
         subtitle_style_background_style=options.get('subtitle_style_background_style', 'none'),
         mode=options.get('mode', 'engaging_moments'),
         user_intent=options.get('user_intent') or None,
@@ -1619,6 +1639,7 @@ if process_clicked:
             'subtitle_style_font_size': data.get('subtitle_style_font_size', 'medium'),
             'subtitle_style_vertical_position': data.get('subtitle_style_vertical_position', 'bottom'),
             'subtitle_style_background_style': data.get('subtitle_style_background_style', 'none'),
+            'subtitle_style_bilingual_layout': data.get('subtitle_style_bilingual_layout', 'auto'),
             'user_intent': user_intent or None,
             'agentic_analysis': agentic_analysis,
             'owner_session_id': current_owner_session_id,
