@@ -66,7 +66,7 @@ SUBTITLE_VERTICAL_POSITION_PRESETS = {
     "middle": 390,
 }
 
-SUBTITLE_BILINGUAL_LAYOUT_OPTIONS = {"auto", "original_only", "bilingual"}
+SUBTITLE_BILINGUAL_LAYOUT_OPTIONS = {"auto", "original_only", "bilingual", "translation_only"}
 SUBTITLE_BACKGROUND_STYLE_OPTIONS = {"none", "light_box", "solid_box"}
 
 
@@ -342,13 +342,19 @@ class SubtitleBurner:
             total += 1
             subtitle_source = "whisper" if srt.name.endswith(".whisper.srt") else "original"
             logger.info(f"  Burning subtitles: {mp4.name} ({subtitle_source})")
+            translated_srt_candidate = mp4.with_suffix(".translated.srt")
             jobs.append(
                 SubtitlePreparationJob(
                     mp4=mp4,
                     srt=srt,
                     ass_path=(output_dir / mp4.name).with_suffix(".ass"),
+                    translated_srt_path=(
+                        translated_srt_candidate
+                        if translated_srt_candidate.exists()
+                        else None
+                    ),
                     translated_output_path=(
-                        mp4.with_suffix(".translated.srt")
+                        translated_srt_candidate
                         if subtitle_translation and self.client
                         else None
                     ),
@@ -758,7 +764,7 @@ class SubtitleBurner:
         last_preview = ""
         for attempt in range(1, self._MAX_TRANSLATION_RETRIES + 1):
             try:
-                response = self.client.simple_chat(prompt, model=self.model, temperature=0)
+                response = self.client.simple_chat(prompt, model=self.model)
                 translated_texts = self._parse_translation_json(response, n)
                 if translated_texts is not None:
                     return [
@@ -846,7 +852,7 @@ class SubtitleBurner:
         for attempt in range(1, self._MAX_VERIFY_RETRIES + 1):
             response = ""
             try:
-                response = self.client.simple_chat(prompt, model=self.model, temperature=0)
+                response = self.client.simple_chat(prompt, model=self.model)
                 parsed = self._extract_json_array(response)
                 if parsed is None:
                     raise ValueError("no JSON array in response")
@@ -921,6 +927,8 @@ class SubtitleBurner:
             show_translation = has_translation
         elif config.bilingual_layout == "original_only":
             show_translation = False
+        elif config.bilingual_layout == "translation_only":
+            show_translation = has_translation
         else:
             show_translation = has_translation
 
@@ -1097,6 +1105,8 @@ class SubtitleBurner:
             segments, translated, translation_requested
         )
         layout, _ = self._resolve_ass_layout(translated)
+        config = self.subtitle_style_config.normalized()
+        translation_only = config.bilingual_layout == "translation_only" and show_translation
         boxed_style = layout["border_style"] == 3
         font_size = layout["font_size"]
         side_margin = int(ASS_PLAY_RES_X * 0.05)
@@ -1104,12 +1114,13 @@ class SubtitleBurner:
         for i, seg in enumerate(segments):
             start = self._srt_time_to_ass(seg["start"])
             end = self._srt_time_to_ass(seg["end"])
-            text = _SPEAKER_TAG_RE.sub("", seg["text"].replace("\n", " "))
-            # Use original_font_size for wrap calculation so it matches the style's actual font size
-            text = self._wrap_ass_text(text, original_font_size, ASS_PLAY_RES_X, side_margin)
-            if boxed_style:
-                text = rf"\h{text}\h"
-            lines.append(f"Dialogue: 0,{start},{end},Original,,0,0,0,,{text}")
+            if not translation_only:
+                text = _SPEAKER_TAG_RE.sub("", seg["text"].replace("\n", " "))
+                # Use original_font_size for wrap calculation so it matches the style's actual font size
+                text = self._wrap_ass_text(text, original_font_size, ASS_PLAY_RES_X, side_margin)
+                if boxed_style:
+                    text = rf"\h{text}\h"
+                lines.append(f"Dialogue: 0,{start},{end},Original,,0,0,0,,{text}")
             if show_translation and translated and i < len(translated):
                 tr_text = _SPEAKER_TAG_RE.sub("", translated[i]["text"].replace("\n", " "))
                 if tr_text:

@@ -576,13 +576,19 @@ class VideoOrchestrator:
                         for mp4 in mp4s:
                             srt = self.subtitle_burner.preferred_subtitle_path_for_clip(mp4)
                             if srt.exists():
+                                translated_srt = mp4.with_suffix(".translated.srt")
                                 ass_jobs.append(
                                     SubtitlePreparationJob(
                                         mp4=mp4,
                                         srt=srt,
                                         ass_path=ass_tmp_dir / mp4.with_suffix(".ass").name,
+                                        translated_srt_path=(
+                                            translated_srt
+                                            if self.subtitle_translation
+                                            else None
+                                        ),
                                         translated_output_path=(
-                                            mp4.with_suffix(".translated.srt")
+                                            translated_srt
                                             if self.subtitle_translation
                                             else None
                                         ),

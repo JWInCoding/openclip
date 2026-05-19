@@ -279,6 +279,13 @@ TRANSLATIONS = {
         'use_background_help': 'Use background information from prompts/background/background.md',
         'use_custom_prompt_help': 'Use custom prompt for highlight analysis',
         'advanced_config_notice': 'For advanced options (e.g. video split duration, Whisper model), edit `core/config.py`.',
+        'skip_steps_section': 'Skip Steps (use existing outputs)',
+        'skip_download': 'Skip Download',
+        'skip_download_help': 'Skip video download and use existing downloaded video',
+        'skip_transcript': 'Skip Transcript',
+        'skip_transcript_help': 'Skip transcript generation and use existing transcript files',
+        'skip_analysis': 'Skip Analysis',
+        'skip_analysis_help': 'Skip engaging moments analysis (can still generate clips from existing analysis file)',
         'speaker_references': 'Speaker References Directory (Preview)',
         'speaker_references_help': 'Directory of reference audio clips for speaker name mapping. Filename stem becomes the speaker name (e.g. references/Host.wav → "Host"). Requires HUGGINGFACE_TOKEN env var.',
         'speaker_references_unavailable': 'Speaker Identification (Preview) — requires extra dependencies: `uv sync --extra speakers`',
@@ -396,6 +403,13 @@ TRANSLATIONS = {
         'use_background_help': '������ prompts/background/background.md 中的背景信息',
         'use_custom_prompt_help': '使用自定义提示进行高光分析',
         'advanced_config_notice': '如需调整高级选项（如视频分割时长、Whisper 模型），请编辑 `core/config.py`。',
+        'skip_steps_section': '跳过步骤（使用已有输出）',
+        'skip_download': '跳过下载',
+        'skip_download_help': '跳过视频下载，使用已下载的视频',
+        'skip_transcript': '跳过转录',
+        'skip_transcript_help': '跳过字幕生成，使用已有的转录文件',
+        'skip_analysis': '跳过分析',
+        'skip_analysis_help': '跳过精彩片段分析（仍可从已有分析文件生成片段）',
         'speaker_references': '说话人参考音频目录（预览版）',
         'speaker_references_help': '包含参考音频片段的目录，用于说话人姓名映射。文件名即说话人姓名（如 references/Host.wav → "Host"）。需要设置 HUGGINGFACE_TOKEN 环境变量。',
         'speaker_references_unavailable': '说话人识别（预览版）— 需要额外依赖：`uv sync --extra speakers`',
@@ -451,6 +465,10 @@ DEFAULT_DATA = {
     'subtitle_style_background_style': 'none',
     'subtitle_style_bilingual_layout': 'auto',
     'generate_cover': True,
+    # Skip steps options
+    'skip_download': False,
+    'skip_transcript': False,
+    'skip_analysis': False,
     # Other form elements
     'input_type': INPUT_TYPE_URL,
     'video_source': "",
@@ -1061,10 +1079,10 @@ with st.sidebar:
                 'solid_box': '实心底框',
             },
         }
-        subtitle_bilingual_layout_values = ['auto', 'bilingual', 'original_only']
+        subtitle_bilingual_layout_values = ['auto', 'bilingual', 'original_only', 'translation_only']
         subtitle_bilingual_layout_labels = {
-            'en': {'auto': 'Auto', 'bilingual': 'Bilingual', 'original_only': 'Translation Only'},
-            'zh': {'auto': '自动', 'bilingual': '双语', 'original_only': '仅翻译'},
+            'en': {'auto': 'Auto', 'bilingual': 'Bilingual', 'original_only': 'Original Only', 'translation_only': 'Translation Only'},
+            'zh': {'auto': '自动', 'bilingual': '双语', 'original_only': '仅原文', 'translation_only': '仅翻译'},
         }
 
         subtitle_style_preset = st.selectbox(
@@ -1198,6 +1216,32 @@ with st.sidebar:
 
         st.caption(t['advanced_config_notice'])
 
+    # Skip steps section
+    with st.expander(t['skip_steps_section']):
+        skip_download = st.checkbox(
+            t['skip_download'],
+            value=data.get('skip_download', False),
+            help=t['skip_download_help'],
+            key=f"skip_download_{st.session_state.reset_counter}"
+        )
+        data['skip_download'] = skip_download
+
+        skip_transcript = st.checkbox(
+            t['skip_transcript'],
+            value=data.get('skip_transcript', False),
+            help=t['skip_transcript_help'],
+            key=f"skip_transcript_{st.session_state.reset_counter}"
+        )
+        data['skip_transcript'] = skip_transcript
+
+        skip_analysis = st.checkbox(
+            t['skip_analysis'],
+            value=data.get('skip_analysis', False),
+            help=t['skip_analysis_help'],
+            key=f"skip_analysis_{st.session_state.reset_counter}"
+        )
+        data['skip_analysis'] = skip_analysis
+
     # Browser runtime state lives in session state; do not persist peer changes globally.
     
     # ============================================================================
@@ -1282,7 +1326,7 @@ def process_video_worker(job, progress_callback):
         llm_provider=options['llm_provider'],
         llm_model=options.get('llm_model'),
         llm_base_url=options.get('llm_base_url'),
-        skip_analysis=False,
+        skip_analysis=options.get('skip_analysis', False),
         generate_clips=options['generate_clips'],
         add_titles=options['add_titles'],
         title_style=options['title_style'],
@@ -1310,7 +1354,8 @@ def process_video_worker(job, progress_callback):
     result = asyncio.run(orchestrator.process_video(
         job.video_source,
         force_whisper=options['force_whisper'],
-        skip_download=False,
+        skip_download=options.get('skip_download', False),
+        skip_transcript=options.get('skip_transcript', False),
         progress_callback=progress_callback,
     ))
 
@@ -1642,6 +1687,9 @@ if process_clicked:
             'subtitle_style_bilingual_layout': data.get('subtitle_style_bilingual_layout', 'auto'),
             'user_intent': user_intent or None,
             'agentic_analysis': agentic_analysis,
+            'skip_download': data.get('skip_download', False),
+            'skip_transcript': data.get('skip_transcript', False),
+            'skip_analysis': data.get('skip_analysis', False),
             'owner_session_id': current_owner_session_id,
             'source_kind': source_kind,
             'upload_id': upload_metadata['upload_id'] if upload_metadata else None,
